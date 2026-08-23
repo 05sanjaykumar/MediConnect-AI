@@ -1,0 +1,27 @@
+# Server
+fastapi
+uvicorn
+python-multipart
+pydantic
+python-dotenv
+
+# Pipecat with all needed services
+pipecat-ai[kokoro,nvidia,silero,websocket]
+
+# LLM
+groq
+
+# Audio
+soundfile
+
+# NumPy (pinned to prevent Kokoro from breaking it at runtime)
+numpy>=2.0.2,<3.0.0
+
+#install modal
+modal
+
+# Database
+sqlalchemy>=2.0
+
+# Telephony (Twilio Media Streams)
+twilio
