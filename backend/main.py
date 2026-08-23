@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import describe
+from routes.admin import router as admin_router
 from routes.appointments import router as appointments_router
 from routes.auth import router as auth_router
 from routes.doctors import router as doctors_router
@@ -59,6 +60,7 @@ if VOICE_AVAILABLE:
 app.include_router(auth_router, prefix="/api")
 app.include_router(doctors_router, prefix="/api")
 app.include_router(appointments_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 
 @app.get("/")

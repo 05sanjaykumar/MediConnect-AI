@@ -125,3 +125,46 @@ class Alternate(BaseModel):
     start_at: datetime
     score: float
     why: str
+
+
+# ----------------------------------------------------------------------- admin
+
+
+class WorkingHourIn(BaseModel):
+    weekday: int = Field(ge=0, le=6, description="0 = Monday, 6 = Sunday")
+    start_time: str = Field(description="HH:MM, 24-hour")
+    end_time: str = Field(description="HH:MM, 24-hour")
+
+
+class DoctorCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    phone: str = Field(min_length=6, max_length=20)
+    specialization: str = Field(min_length=2, max_length=80)
+    qualification: str = "MBBS"
+    consultation_fee: float = 500.0
+    slot_minutes: int = Field(default=15, ge=5, le=120)
+    room: str | None = None
+    email: str | None = None
+    password: str = "demo1234"
+    working_hours: list[WorkingHourIn] = Field(default_factory=list)
+
+
+class DoctorUpdate(BaseModel):
+    name: str | None = None
+    specialization: str | None = None
+    qualification: str | None = None
+    consultation_fee: float | None = None
+    slot_minutes: int | None = Field(default=None, ge=5, le=120)
+    room: str | None = None
+    is_active: bool | None = None
+
+
+class AdminOverview(BaseModel):
+    doctors_total: int
+    doctors_active: int
+    doctors_available_now: int
+    patients: int
+    appointments_upcoming: int
+    appointments_today: int
+    booked_by_voice: int
+    booked_by_web: int
