@@ -157,12 +157,14 @@ class Appointment(Base):
     __tablename__ = "appointments"
     __table_args__ = (
         # THE guard. A slot can have many cancelled appointments in its history
-        # but only ever one confirmed. Enforced by SQLite, not by our code.
+        # but only ever one confirmed. Enforced by the database, not by our code.
         Index(
             "uq_one_confirmed_per_slot",
             "slot_id",
             unique=True,
+            # Both dialects get the same guarantee; each ignores the other's kwarg.
             sqlite_where=text("status = 'confirmed'"),
+            postgresql_where=text("status = 'confirmed'"),
         ),
     )
 

@@ -1,34 +1,32 @@
 # backend/database.py
-"""SQLite connection, session factory and declarative base."""
+"""Supabase Postgres connection, session factory and declarative base."""
 
 import os
 
-from sqlalchemy import create_engine, event
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "mediconnect.db"))
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip().strip('"')
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Copy .example.env to .env and fill in the "
+        "Supabase connection string."
+    )
 
 engine = create_engine(
     DATABASE_URL,
-    # FastAPI serves requests from a threadpool, so a connection may be used
-    # from a different thread than the one that created it.
-    connect_args={"check_same_thread": False},
+    # Supabase's pooler runs pgbouncer in transaction mode, which cannot carry
+    # server-side prepared statements between queries. Turning them off is what
+    # stops the "prepared statement already exists" errors.
+    connect_args={"prepare_threshold": None},
+    pool_pre_ping=True,  # a pooled connection may have been closed under us
+    pool_size=5,
+    max_overflow=5,
 )
-
-
-@event.listens_for(engine, "connect")
-def _configure_sqlite(dbapi_connection, connection_record):
-    """Turn on the two pragmas we actually rely on."""
-    cursor = dbapi_connection.cursor()
-    # SQLite ignores REFERENCES clauses unless this is on.
-    cursor.execute("PRAGMA foreign_keys=ON")
-    # Write-ahead logging lets readers continue during a write, which matters
-    # for the concurrent-booking test.
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.close()
-
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
@@ -46,8 +44,11 @@ def get_db():
         db.close()
 
 
-def init_db():
-    """Create any missing tables. Safe to call on every startup."""
-    import models  # noqa: F401  (registers the mappers)
-
-    Base.metadata.create_all(bind=engine)
+def describe() -> str:
+    """What we're connected to, with the password masked."""
+    safe = DATABASE_URL
+    if "@" in safe:
+        head, tail = safe.split("@", 1)
+        if ":" in head:
+            safe = head.rsplit(":", 1)[0] + ":***@" + tail
+    return f"Supabase Postgres -> {safe}"
