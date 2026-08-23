@@ -55,10 +55,13 @@ class StatusUpdate(BaseModel):
 class StatusOut(BaseModel):
     doctor_id: int
     doctor_name: str
+    from_status: str | None = None
     status: str
     note: str | None
     updated_at: datetime
-    blocked_slots: int = 0
+    slots_blocked: int = 0
+    slots_released: int = 0
+    appointments_needing_attention: list[int] = Field(default_factory=list)
 
 
 # ----------------------------------------------------------------------- slots

@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user
-from models import Doctor, DoctorStatus, StatusEvent, User
+from models import Doctor, User
 from schemas import DoctorOut, DoctorSlots, SlotOut, StatusOut, StatusUpdate
 from services.availability import blocked_until
 from services.slot_engine import available_slots, next_available
+from services.status import change_status
 
 router = APIRouter(prefix="/doctors", tags=["doctors"])
 
@@ -114,8 +115,8 @@ def update_status(
 ):
     """Change a doctor's live status.
 
-    A doctor may change their own; an admin may change anyone's. The slot
-    blocking and websocket broadcast get wired in at the next step.
+    A doctor may change their own; an admin may change anyone's. Blocking the
+    affected slots and reporting what happened is handled by services.status.
     """
     doctor = db.get(Doctor, doctor_id)
     if doctor is None:
@@ -126,25 +127,16 @@ def update_status(
     if user.role == "patient":
         raise HTTPException(status_code=403, detail="Only doctors and admins can do this.")
 
-    record = doctor.status
-    previous = record.status if record else None
-
-    if record is None:
-        record = DoctorStatus(doctor_id=doctor.id)
-        db.add(record)
-
-    record.status = body.status
-    record.note = body.note
-    record.updated_at = datetime.now()
-
-    db.add(StatusEvent(doctor_id=doctor.id, from_status=previous, to_status=body.status))
-    db.commit()
-    db.refresh(record)
+    result = change_status(db, doctor, body.status, body.note)
 
     return StatusOut(
-        doctor_id=doctor.id,
-        doctor_name=doctor.user.name,
-        status=record.status,
-        note=record.note,
-        updated_at=record.updated_at,
+        doctor_id=result.doctor_id,
+        doctor_name=result.doctor_name,
+        from_status=result.from_status,
+        status=result.to_status,
+        note=result.note,
+        updated_at=result.updated_at,
+        slots_blocked=result.slots_blocked,
+        slots_released=result.slots_released,
+        appointments_needing_attention=result.appointments_needing_attention,
     )
