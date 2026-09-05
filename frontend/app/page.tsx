@@ -41,9 +41,18 @@ export default function Home() {
           isConnectedRef.current = false;
           setStatus("idle");
         },
-        onError: (err) => {
-          setError(String(err));
-          setStatus("error");
+        onError: (message) => {
+          // The payload is an RTVIMessage whose data is { error, fatal }.
+          // String(message) printed "[object Object]" and hid what went wrong.
+          const data = message?.data as { error?: string; fatal?: boolean } | undefined;
+          const text = data?.error ?? JSON.stringify(message);
+          console.warn("[pipecat]", data?.fatal ? "fatal:" : "non-fatal:", text);
+          // Non-fatal errors (e.g. a TTS chunk that arrived late) are recovered
+          // by the pipeline itself — don't tear the UI down over them.
+          if (data?.fatal) {
+            setError(text);
+            setStatus("error");
+          }
         },
         onBotStartedSpeaking: () => setStatus("speaking"),
         onBotStoppedSpeaking: () => setStatus("listening"),
@@ -51,7 +60,9 @@ export default function Home() {
         onUserTranscript: (data) => {
           if (data.final) setTranscript(data.text);
         },
-        onBotTranscript: (data) => setBotReply(data.text),
+        // onBotTranscript is deprecated in client-js 1.13. onBotOutput carries
+        // the same text plus whether it will actually be spoken aloud.
+        onBotOutput: (data) => setBotReply(data.text),
       },
     });
 

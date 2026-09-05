@@ -24,6 +24,11 @@ LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 # when someone is waiting on the line.
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low")
 
+# How long the caller must pause before we treat their turn as finished.
+# Too short cuts people off mid-sentence; too long feels like the agent is
+# ignoring them. 0.8s is a reasonable phone-call pause.
+USER_SPEECH_TIMEOUT = float(os.getenv("USER_SPEECH_TIMEOUT", "0.8"))
+
 # ------------------------------------------------------------------------ STT
 # NVIDIA streams transcripts as the caller speaks. Groq's whisper-large-v3-turbo
 # is a batch API — a usable fallback, but it waits for the utterance to finish.

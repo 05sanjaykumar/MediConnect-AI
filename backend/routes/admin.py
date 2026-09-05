@@ -269,6 +269,13 @@ def overview(db: Session = Depends(get_db)):
                 Slot.start_at < today_start + timedelta(days=1),
             )
         ) or 0,
-        booked_by_voice=count(Appointment, Appointment.created_via == "voice"),
-        booked_by_web=count(Appointment, Appointment.created_via == "web"),
+        # Confirmed only. Tests and rehearsals cancel rather than delete (an
+        # appointment is never deleted), and those would otherwise inflate the
+        # number the demo puts on screen.
+        booked_by_voice=count(
+            Appointment, Appointment.created_via == "voice", Appointment.status == "confirmed"
+        ),
+        booked_by_web=count(
+            Appointment, Appointment.created_via == "web", Appointment.status == "confirmed"
+        ),
     )

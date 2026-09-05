@@ -34,6 +34,21 @@ async def lifespan(app: FastAPI):
     print(f"   voice:    {'pipecat loaded' if VOICE_AVAILABLE else 'disabled (pipecat not installed)'}")
     # Schema is owned by Alembic. Run `alembic upgrade head` after pulling
     # changes; the app never alters tables on startup.
+
+    # Warm the connection pool. The first connection to Supabase pays DNS,
+    # TLS and auth — about five seconds to another region — and without this
+    # the very first tool call of the very first voice call pays it, while
+    # the caller sits in silence.
+    from sqlalchemy import text
+
+    from database import SessionLocal
+
+    warm = [SessionLocal() for _ in range(4)]
+    for s in warm:
+        s.execute(text("SELECT 1"))
+    for s in warm:
+        s.close()
+    print("   pool:     warmed (4 connections)")
     yield
     print("🛑 Shutting down...")
 
