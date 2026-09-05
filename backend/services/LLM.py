@@ -11,7 +11,7 @@ from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from agents.prompt import build_system_prompt
+from agents.prompt import build_system_prompt, greeting_for
 from agents.tools import VoiceSession, build_tools
 
 
@@ -53,6 +53,10 @@ def get_llm_context(session: VoiceSession | None = None):
         messages=[{"role": "system", "content": build_system_prompt(session)}],
         tools=build_tools(session),
     )
+    # The greeting is spoken by TTS the moment the call connects (routes/audio.py),
+    # with no model call. Record it here as the assistant's first line so the
+    # model knows it has already introduced itself and used the caller's name.
+    context.add_message({"role": "assistant", "content": greeting_for(session)})
     user_params = LLMUserAggregatorParams(
         user_turn_strategies=UserTurnStrategies(
             stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=USER_SPEECH_TIMEOUT)],

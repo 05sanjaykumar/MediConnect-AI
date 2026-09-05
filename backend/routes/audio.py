@@ -14,7 +14,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.frames.frames import Frame, InterruptionFrame
+from pipecat.frames.frames import Frame, InterruptionFrame, TTSSpeakFrame
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -22,6 +22,7 @@ from pipecat.transports.websocket.fastapi import (
 )
 from sqlalchemy import select
 
+from agents.prompt import greeting_for
 from agents.tools import VoiceSession
 from database import SessionLocal
 from models import User
@@ -130,6 +131,14 @@ async def voice_websocket(
     )
 
     task = build_pipeline(transport, session)
+
+    # Speak first. The greeting goes straight to TTS — no model call — so the
+    # caller hears a voice within a second of connecting, by name if we know
+    # them. The same line is already in the LLM context as the assistant's
+    # opening, so the model won't introduce itself a second time.
+    @transport.event_handler("on_client_connected")
+    async def _greet(transport, websocket):
+        await task.queue_frames([TTSSpeakFrame(greeting_for(session))])
 
     call_id = f"web:{id(websocket)}"
     ACTIVE_CALLS[call_id] = (session, task)

@@ -250,9 +250,9 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
             await params.result_callback({
                 "found": 0,
                 "departments_we_have": departments,
-                "message": "Nothing matched. Pick the closest department from "
-                           "departments_we_have and search again, or offer the "
-                           "list to the patient.",
+                "message": "We don't have that department. Tell the patient so, read "
+                           "out departments_we_have, and ask which they'd like. Do not "
+                           "choose a substitute for them.",
             })
             return
 

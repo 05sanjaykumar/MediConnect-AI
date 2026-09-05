@@ -12,19 +12,24 @@ patient on the phone. It is {now}.
 
 WHO IS CALLING
 {identity}
-- Only give set_caller_details a name the caller actually said. If they haven't, ask \
-"May I have your name, please?" and wait. Never use a placeholder like "Patient".
+- Only give set_caller_details a name the caller actually said. Never use a \
+placeholder like "Patient".
+- Never write the patient's side of the conversation. When you ask a question, stop \
+and wait for their answer. Do not answer it for them and do not book on an answer \
+they have not given.
 
 SPEAKING
 - At most two or three short sentences, about twelve words each. The voice can't \
 start until a sentence is complete, so long sentences are long silences.
-- No markdown, lists or symbols — everything is read aloud.
+- No markdown, lists, symbols or ellipses — everything is read aloud. Every \
+sentence must contain words.
 - Say times and dates like a person: "ten past nine in the morning", "Monday the \
 seventh". Never read out an id or an appointment number.
 
 WORKING
 - Call search_doctors before naming any doctor; never name one from memory. If it \
-finds nothing it lists our departments — pick the closest and search once more.
+finds nothing, tell the patient we don't have that department and read out the ones \
+we do. Let them choose. Do not pick a substitute for them.
 - Call get_available_slots before offering any time. If the patient hasn't said a \
 day, ask which day suits them. If a day is empty the tool gives next_available — \
 offer that; don't check further days.
@@ -43,30 +48,43 @@ will discuss it at the appointment.
 """
 
 
-def describe_caller(session) -> str:
-    """The identity block: what we know about the caller, and what to do about it.
+def greeting_for(session) -> str:
+    """What the agent says the moment the call connects, before the caller speaks.
 
-    Three cases. A number we recognise — confirm the name once, don't ask for
-    it. A number we don't — ask for their name before booking. No number at
-    all (a browser test with none configured) — ask for name and number.
+    Spoken by TTS directly (no model call, so it's instant) and also written
+    into the conversation as the assistant's first line, so the model knows
+    it has already introduced itself and, for a known caller, already used
+    their name — which is what stops it asking "is this Sanjay?" every turn.
     """
-    if session is None or not session.caller_phone:
+    if session is not None and session.patient_id and session.patient_name:
+        first = session.patient_name.replace("Dr. ", "").split()[0]
+        return f"Hello {first}, this is MediConnect. How can I help you today?"
+    if session is not None and session.caller_phone:
+        return "Hello, this is MediConnect. May I have your name, please?"
+    return "Hello, this is MediConnect. May I have your name and phone number, please?"
+
+
+def describe_caller(session) -> str:
+    """The identity block: what we know, what was already said, what's left."""
+    greeting = greeting_for(session)
+    if session is not None and session.patient_id and session.patient_name:
         return (
-            "- You do not know who is calling. Before booking, ask for their name and "
-            "their phone number, then call set_caller_details with both. Never book "
-            "for someone you have not identified."
+            f'- You already opened the call with: "{greeting}" The caller is '
+            f"{session.patient_name}; their number is on record. Identity is confirmed — "
+            "do not ask who they are or whether the booking is for them. Only if they "
+            "say it is for someone else, ask that person's name and call "
+            "set_caller_details."
         )
-    if session.patient_id and session.patient_name:
+    if session is not None and session.caller_phone:
         return (
-            f"- The caller's number is on record as {session.patient_name}. Before the "
-            f'first booking, confirm once: "Is this booking for {session.patient_name}?" '
-            "If it is for someone else, ask that person's name and call "
-            "set_caller_details with it."
+            f'- You already opened the call with: "{greeting}" Their number is not on '
+            "record. Wait for their name, call set_caller_details with it, and only "
+            "then book. Never guess a name."
         )
     return (
-        f"- The caller's number, {session.caller_phone}, is not on record. Before "
-        "booking, ask for their name and call set_caller_details with it. Never "
-        "guess a name."
+        f'- You already opened the call with: "{greeting}" You do not know who is '
+        "calling. Wait for their name and their phone number, call set_caller_details "
+        "with both, and only then book."
     )
 
 

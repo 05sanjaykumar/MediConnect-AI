@@ -237,8 +237,10 @@ def test_prompt_identity_block_covers_all_three_cases():
     from agents.prompt import build_system_prompt
 
     known = VoiceSession(patient_id=3, patient_name="Sanjay Kumar", caller_phone="9840012346")
-    assert "on record as Sanjay Kumar" in build_system_prompt(known)
-    assert "Is this booking for Sanjay Kumar?" in build_system_prompt(known)
+    prompt = build_system_prompt(known)
+    assert "The caller is Sanjay Kumar" in prompt and "on record" in prompt
+    assert "Identity is confirmed" in prompt
+    assert "Is this booking for" not in prompt, "the old repeat-question instruction is back"
 
     unknown = VoiceSession(caller_phone=UNKNOWN_PHONE)
     assert "not on record" in build_system_prompt(unknown)
@@ -372,3 +374,75 @@ def test_known_caller_booking_for_someone_else_files_under_owner(tools, session)
         db.close()
     finally:
         call(tools["cancel_appointment"], appointment_id=booked["appointment_id"])
+
+
+
+# ------------------------------------------------------------------- greeting
+
+
+def test_greeting_for_all_three_cases():
+    from agents.prompt import greeting_for
+
+    known = VoiceSession(patient_id=3, patient_name="Sanjay Kumar", caller_phone="9840012346")
+    assert greeting_for(known) == "Hello Sanjay, this is MediConnect. How can I help you today?"
+    assert greeting_for(VoiceSession(caller_phone=UNKNOWN_PHONE)) == \
+        "Hello, this is MediConnect. May I have your name, please?"
+    assert "name and phone number" in greeting_for(VoiceSession())
+
+
+def test_greeting_is_the_assistants_first_line_in_context():
+    """The model must know it already spoke, or it introduces itself twice."""
+    from services.LLM import get_llm_context
+    from agents.prompt import greeting_for
+
+    session = VoiceSession(patient_id=3, patient_name="Sanjay Kumar", caller_phone="9840012346")
+    pair = get_llm_context(session)
+    context = pair.user().context
+    messages = context.get_messages()
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["content"] == greeting_for(session)
+
+
+# ---------------------------------------------------------------- tts chunking
+
+
+def _chunks(text: str) -> list[str]:
+    from services.TTS import ClauseTextAggregator
+    from pipecat.utils.text.base_text_aggregator import AggregationType
+
+    async def run():
+        agg = ClauseTextAggregator(aggregation_type=AggregationType.SENTENCE)
+        out = []
+        for ch in text:
+            async for a in agg.aggregate(ch):
+                out.append(a.text)
+        tail = await agg.flush()
+        if tail is not None:
+            out.append(tail.text)
+        return out
+
+    return asyncio.run(run())
+
+
+def test_long_sentence_is_cut_at_a_clause():
+    """The 8-second sentence from the call log should start speaking sooner."""
+    text = ("We don't have a neurologist right now, but an ENT doctor, Dr. Fatima Sheikh, "
+            "is free on Monday the seventh of September at nine in the morning. ")
+    chunks = _chunks(text)
+    assert len(chunks) >= 2, chunks
+    assert chunks[0].endswith(","), "first chunk should end at a clause boundary"
+    assert "".join(c.strip() for c in chunks).replace(" ", "") == text.replace(" ", "").strip(), \
+        "chunking must not lose or duplicate text"
+
+
+def test_short_sentences_are_left_whole():
+    chunks = _chunks("Your appointment is booked. Dr. Lakshmi Venkat, Monday at nine. ")
+    assert chunks[0] == "Your appointment is booked."
+    assert "Dr. Lakshmi Venkat, Monday at nine." in chunks[1]
+
+
+def test_punctuation_only_fragments_are_dropped():
+    """The model emits '..' on its own; that must not become a TTS call."""
+    assert _chunks(".. ") == []
+    assert _chunks("Hello there. .. ") == ["Hello there."]
