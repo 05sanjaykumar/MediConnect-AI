@@ -146,6 +146,78 @@ def _looks_like_a_real_name(name: str) -> bool:
     return any(ch.isalpha() for ch in cleaned)
 
 
+_DIGIT_WORDS = {
+    "zero": "0", "oh": "0", "o": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "double": "", "triple": "",  # "double five" is handled below
+}
+
+
+def _digits_in(text: str) -> str:
+    """Every digit in `text`, in order — including ones spoken as words.
+
+    Speech-to-text writes "9840012346", "98400 12346", "984-001-2346" or,
+    occasionally, "nine eight four double zero". All of those must match.
+    """
+    out: list[str] = []
+    repeat = 1
+    for token in text.lower().replace("-", " ").split():
+        cleaned = token.strip(".,;:!?()")
+        if cleaned in ("double", "triple"):
+            repeat = 2 if cleaned == "double" else 3
+            continue
+        if cleaned in _DIGIT_WORDS and _DIGIT_WORDS[cleaned]:
+            out.append(_DIGIT_WORDS[cleaned] * repeat)
+        else:
+            out.append("".join(ch for ch in cleaned if ch.isdigit()))
+        repeat = 1
+    return "".join(out)
+
+
+def _normalize_phone(raw: str) -> str | None:
+    """Ten digits, or None. Tolerates +91, spaces, dashes and a leading 0."""
+    digits = _digits_in(raw)
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else None
+
+
+def _looks_fake_phone(digits: str) -> bool:
+    """Numbers a model reaches for when it hasn't actually been given one."""
+    if digits.startswith("555") or len(set(digits)) == 1:
+        return True
+    return digits in ("1234567890", "0123456789", "9876543210")
+
+
+def _spoken_by_caller(context, digits: str) -> bool:
+    """Did these ten digits actually occur in something the caller said?
+
+    This is the guard that matters. The model invented 5551234567 for a
+    caller who had only given their name — and wrote the caller's "answer"
+    itself. The tool can see the transcript, so it checks.
+    """
+    if context is None:  # unit tests without a pipeline context
+        return True
+    try:
+        messages = context.get_messages()
+    except Exception:
+        return True
+    heard = "".join(
+        _digits_in(m.get("content") or "")
+        for m in messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
+    return digits in heard
+
+
+def _spoken_digits(digits: str) -> str:
+    """'9840012346' -> '9 8 4 0 0, 1 2 3, 4 6' — read as digits, not billions."""
+    groups = (digits[:5], digits[5:8], digits[8:])
+    return ", ".join(" ".join(g) for g in groups if g)
+
+
 def _parse_day(value: str | None) -> date:
     """Accept an ISO date, or the words the model is most likely to produce."""
     if not value:
@@ -397,21 +469,41 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
     async def set_caller_details(params: FunctionCallParams):
         """Record who we're talking to. The only way an unknown caller gets a name."""
         name = " ".join((params.arguments.get("name") or "").split())
-        phone = (params.arguments.get("phone") or "").strip() or None
+        raw_phone = (params.arguments.get("phone") or "").strip() or None
 
         if not _looks_like_a_real_name(name):
             await params.result_callback({
                 "ok": False,
                 "error": "That isn't a name the caller gave you. Ask: \"May I have your "
-                         "name, please?\" and call this again with what they say.",
+                         "name, please?\" and stop. Call this again with what they say.",
             })
             return
-        if phone:
-            session.caller_phone = phone
+
+        if raw_phone:
+            digits = _normalize_phone(raw_phone)
+            if digits is None or _looks_fake_phone(digits):
+                await params.result_callback({
+                    "ok": False,
+                    "error": "That is not a valid phone number the caller gave you. Ask: "
+                             "\"May I have your phone number, please?\" and stop. Pass "
+                             "exactly the digits they read out.",
+                })
+                return
+            if not _spoken_by_caller(getattr(params, "context", None), digits):
+                await params.result_callback({
+                    "ok": False,
+                    "error": "The caller has not said that number. Never make one up. "
+                             "Ask: \"May I have your phone number, please?\" and stop.",
+                })
+                return
+            session.caller_phone = digits
+
         if not session.caller_phone:
             await params.result_callback({
                 "ok": False,
-                "error": "Ask for the caller's phone number as well; I need it to file the booking.",
+                "name_recorded": name,
+                "error": "Got the name. Now ask: \"And your phone number, please?\" and "
+                         "stop — I need it to file the booking.",
             })
             return
 
@@ -450,7 +542,13 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                 session.patient_id = user.id
                 session.patient_name = user.name
                 session.booking_for = None
-                return {"ok": True, "name": user.name, "new_patient": created}
+                return {
+                    "ok": True,
+                    "name": user.name,
+                    "new_patient": created,
+                    # If you repeat the number back, say it exactly like this.
+                    "phone_spoken": _spoken_digits(session.caller_phone),
+                }
             finally:
                 db.close()
 

@@ -446,3 +446,92 @@ def test_punctuation_only_fragments_are_dropped():
     """The model emits '..' on its own; that must not become a TTS call."""
     assert _chunks(".. ") == []
     assert _chunks("Hello there. .. ") == ["Hello there."]
+
+
+# ------------------------------------------------------------ phone numbers
+
+
+class FakeContext:
+    """Stands in for LLMContext: only get_messages() is needed by the guard."""
+
+    def __init__(self, *user_lines: str):
+        self._messages = [{"role": "user", "content": line} for line in user_lines]
+
+    def get_messages(self, *args, **kwargs):
+        return self._messages
+
+
+class FakeParamsWithContext(FakeParams):
+    def __init__(self, context, **arguments):
+        super().__init__(**arguments)
+        self.context = context
+
+
+def call_ctx(tool, context, **arguments):
+    params = FakeParamsWithContext(context, **arguments)
+    asyncio.run(tool.handler(params))
+    return params.result
+
+
+TEST_PHONE = "9111100005"
+
+
+def _fresh_anonymous_tools():
+    _delete_user_by_phone(TEST_PHONE)
+    session = VoiceSession()  # browser with no ?phone=
+    return session, {t.name: t for t in build_tools(session)}
+
+
+def test_invented_phone_number_is_refused():
+    """Exactly what happened in the log: name given, number made up (555...)."""
+    session, tools = _fresh_anonymous_tools()
+    ctx = FakeContext("Hello", "So I am Sanjay")
+    result = call_ctx(tools["set_caller_details"], ctx, name="Sanjay", phone="5551234567")
+    assert result["ok"] is False
+    assert "phone number" in result["error"].lower()
+    assert session.caller_phone is None, "an invented number was recorded"
+
+
+def test_phone_not_in_transcript_is_refused_even_if_plausible():
+    session, tools = _fresh_anonymous_tools()
+    ctx = FakeContext("So I am Sanjay")            # never said any digits
+    result = call_ctx(tools["set_caller_details"], ctx, name="Sanjay", phone="9111100005")
+    assert result["ok"] is False
+    assert "has not said that number" in result["error"]
+
+
+def test_obviously_fake_numbers_are_refused():
+    session, tools = _fresh_anonymous_tools()
+    for fake in ("1234567890", "9999999999", "0000000000", "5559876543"):
+        ctx = FakeContext(f"my number is {fake}")   # even if 'said'
+        assert call_ctx(tools["set_caller_details"], ctx, name="Sanjay", phone=fake)["ok"] is False
+
+
+def test_phone_the_caller_actually_said_is_accepted_and_spoken_as_digits():
+    session, tools = _fresh_anonymous_tools()
+    try:
+        ctx = FakeContext("So I am Sanjay", "my number is 91111 00005")
+        result = call_ctx(tools["set_caller_details"], ctx, name="Sanjay", phone="+91 91111-00005")
+        assert result["ok"] is True, result
+        assert session.caller_phone == TEST_PHONE          # normalised
+        assert result["phone_spoken"] == "9 1 1 1 1, 0 0 0, 0 5"
+    finally:
+        _delete_user_by_phone(TEST_PHONE)
+
+
+def test_phone_spoken_as_words_is_accepted():
+    session, tools = _fresh_anonymous_tools()
+    try:
+        ctx = FakeContext("nine one triple one zero zero double zero five")
+        result = call_ctx(tools["set_caller_details"], ctx, name="Sanjay", phone="9111100005")
+        assert result["ok"] is True, result
+    finally:
+        _delete_user_by_phone(TEST_PHONE)
+
+
+def test_name_only_asks_for_the_number_next():
+    session, tools = _fresh_anonymous_tools()
+    result = call_ctx(tools["set_caller_details"], FakeContext("So I am Sanjay"), name="Sanjay")
+    assert result["ok"] is False
+    assert result.get("name_recorded") == "Sanjay"
+    assert "phone number" in result["error"]
