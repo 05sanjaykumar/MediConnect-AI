@@ -24,8 +24,11 @@ engine = create_engine(
     # stops the "prepared statement already exists" errors.
     connect_args={"prepare_threshold": None},
     pool_pre_ping=True,  # a pooled connection may have been closed under us
-    pool_size=5,
-    max_overflow=5,
+    # Sized for the web API and a voice call running at the same time. Also
+    # keeps connections warm: a burst of cold connects means a burst of DNS
+    # lookups, which the OS resolver will start refusing.
+    pool_size=10,
+    max_overflow=10,
 )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

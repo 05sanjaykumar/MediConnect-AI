@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -176,6 +177,16 @@ def test_concurrent_bookings_produce_exactly_one_appointment(db, doctor, free_sl
 
     slot_id = free_slot.id
 
+    # Warm the connection pool first. Thirty threads connecting cold means
+    # thirty simultaneous DNS lookups, which the OS resolver refuses — and the
+    # resulting failures look like booking bugs when they are not. A running
+    # server always has a warm pool, so warming it here is the realistic case.
+    warm = [SessionLocal() for _ in range(10)]
+    for s in warm:
+        s.execute(text("SELECT 1"))
+    for s in warm:
+        s.close()
+
     def attempt(index: int) -> str:
         session = SessionLocal()
         try:
@@ -184,7 +195,9 @@ def test_concurrent_bookings_produce_exactly_one_appointment(db, doctor, free_sl
         except BookingError as err:
             return err.code
         except Exception as err:  # anything else is a real failure
-            return f"CRASH:{type(err).__name__}"
+            # Include the message: "CRASH:OperationalError" on its own tells you
+            # nothing about whether the booking logic or the connection broke.
+            return f"CRASH:{type(err).__name__}: {str(err).splitlines()[0][:120]}"
         finally:
             session.close()
 
