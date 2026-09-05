@@ -16,7 +16,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from models import Appointment, Doctor, Slot, User
 from services.availability import is_slot_bookable
@@ -33,8 +33,22 @@ class BookingError(Exception):
 
 
 def _lock_slot(db: Session, slot_id: int) -> Slot | None:
-    """Fetch a slot with SELECT ... FOR UPDATE, so concurrent bookers queue."""
-    return db.get(Slot, slot_id, with_for_update=True)
+    """Fetch a slot with SELECT ... FOR UPDATE, so concurrent bookers queue.
+
+    Brings the doctor, their status and their name along in the same query.
+    Booking used to cost ten round trips, most of them lazy loads of exactly
+    these — and each trip is half a second with the database in another
+    region. The lock is on the slot row only; the joined rows are read plain.
+    """
+    return db.scalar(
+        select(Slot)
+        .options(
+            joinedload(Slot.doctor).joinedload(Doctor.user),
+            joinedload(Slot.doctor).joinedload(Doctor.status),
+        )
+        .where(Slot.id == slot_id)
+        .with_for_update(of=Slot)
+    )
 
 
 def book(
@@ -61,7 +75,7 @@ def book(
             "That slot is no longer available — the doctor's schedule changed.",
         )
 
-    doctor = db.get(Doctor, slot.doctor_id)
+    doctor = slot.doctor
     status = doctor.status.status if doctor and doctor.status else "available"
 
     now = datetime.now()
@@ -83,6 +97,12 @@ def book(
         created_via=created_via,
         reason=reason,
     )
+    # Hand it the objects we already hold, so whoever reads
+    # appointment.doctor.user.name or appointment.slot.start_at next doesn't
+    # go back to the database for them.
+    appointment.slot = slot
+    appointment.doctor = doctor
+    appointment.patient = patient
     slot.state = "booked"
     db.add(appointment)
 
@@ -94,7 +114,8 @@ def book(
         db.rollback()
         raise BookingError("SLOT_TAKEN", "That slot has just been taken.")
 
-    db.refresh(appointment)
+    # No refresh: the id came back from INSERT ... RETURNING, created_at is a
+    # Python-side default, and the session doesn't expire on commit.
     return appointment
 
 

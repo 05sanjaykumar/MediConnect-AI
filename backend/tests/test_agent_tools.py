@@ -212,3 +212,163 @@ def test_unavailable_doctor_is_reported_not_hidden(tools):
     entry = result["doctors"][0]
     assert entry["name"] == name
     assert "_" not in entry["status"], "status must be speakable, not a code"
+
+
+# ------------------------------------------------------------ caller identity
+
+
+UNKNOWN_PHONE = "9111100001"
+
+
+def _delete_user_by_phone(phone: str) -> None:
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.phone == phone).first()
+        if u:
+            for a in db.query(Appointment).filter(Appointment.patient_id == u.id).all():
+                db.delete(a)
+            db.delete(u)
+            db.commit()
+    finally:
+        db.close()
+
+
+def test_prompt_identity_block_covers_all_three_cases():
+    from agents.prompt import build_system_prompt
+
+    known = VoiceSession(patient_id=3, patient_name="Sanjay Kumar", caller_phone="9840012346")
+    assert "on record as Sanjay Kumar" in build_system_prompt(known)
+    assert "Is this booking for Sanjay Kumar?" in build_system_prompt(known)
+
+    unknown = VoiceSession(caller_phone=UNKNOWN_PHONE)
+    assert "not on record" in build_system_prompt(unknown)
+    assert "set_caller_details" in build_system_prompt(unknown)
+
+    nobody = VoiceSession()
+    assert "name and their phone number" in build_system_prompt(nobody)
+
+
+def test_unknown_caller_cannot_book_without_a_name():
+    """A new number must never get a made-up patient record."""
+    _delete_user_by_phone(UNKNOWN_PHONE)
+    session = VoiceSession(caller_phone=UNKNOWN_PHONE)
+    tools = {t.name: t for t in build_tools(session)}
+
+    call(tools["search_doctors"], specialization="cardio")
+    doctor_id = sorted(session.offered_doctors)[0]
+    slots = call(tools["get_available_slots"], doctor_id=doctor_id,
+                 date=_next_working_day(6).isoformat())
+    slot_id = slots["slots"][-1]["slot_id"]
+
+    result = call(tools["book_appointment"], slot_id=slot_id)
+    assert result["booked"] is False
+    assert result["code"] == "NEED_NAME"
+    assert "set_caller_details" in result["instruction"]
+
+    db = SessionLocal()
+    assert db.query(User).filter(User.phone == UNKNOWN_PHONE).first() is None, \
+        "a patient record was created without a name"
+    db.close()
+
+
+def test_unknown_caller_books_after_giving_a_name():
+    _delete_user_by_phone(UNKNOWN_PHONE)
+    session = VoiceSession(caller_phone=UNKNOWN_PHONE)
+    tools = {t.name: t for t in build_tools(session)}
+    try:
+        call(tools["search_doctors"], specialization="cardio")
+        doctor_id = sorted(session.offered_doctors)[0]
+        slots = call(tools["get_available_slots"], doctor_id=doctor_id,
+                     date=_next_working_day(6).isoformat())
+        slot_id = slots["slots"][-1]["slot_id"]
+
+        details = call(tools["set_caller_details"], name="Priya Test")
+        assert details["ok"] is True
+        assert details["new_patient"] is True
+
+        booked = call(tools["book_appointment"], slot_id=slot_id, reason="check-up")
+        assert booked["booked"] is True
+
+        db = SessionLocal()
+        user = db.query(User).filter(User.phone == UNKNOWN_PHONE).first()
+        assert user is not None and user.name == "Priya Test"
+        appt = db.get(Appointment, booked["appointment_id"])
+        assert appt.patient_id == user.id and appt.created_via == "voice"
+        db.close()
+    finally:
+        _delete_user_by_phone(UNKNOWN_PHONE)
+
+
+def test_set_caller_details_needs_a_real_name():
+    session = VoiceSession(caller_phone=UNKNOWN_PHONE)
+    tools = {t.name: t for t in build_tools(session)}
+    assert call(tools["set_caller_details"], name="")["ok"] is False
+    assert call(tools["set_caller_details"], name="A")["ok"] is False
+
+
+def test_caller_with_no_phone_at_all_is_asked_for_both():
+    session = VoiceSession()  # browser with nothing configured
+    tools = {t.name: t for t in build_tools(session)}
+    # name alone isn't enough — we need somewhere to file the booking
+    result = call(tools["set_caller_details"], name="Someone New")
+    assert result["ok"] is False
+    assert "phone" in result["error"].lower()
+
+
+# ------------------------------------------------- identity: the harder cases
+
+
+def test_placeholder_names_are_rejected():
+    """The model must not be able to satisfy the guard with 'Patient'."""
+    session = VoiceSession(caller_phone=UNKNOWN_PHONE)
+    tools = {t.name: t for t in build_tools(session)}
+    for fake in ("Patient", "caller", "the patient", "unknown", "Me", "N/A"):
+        result = call(tools["set_caller_details"], name=fake)
+        assert result["ok"] is False, f"accepted placeholder {fake!r}"
+        assert "May I have your name" in result["error"]
+    db = SessionLocal()
+    assert db.query(User).filter(User.phone == UNKNOWN_PHONE).first() is None
+    db.close()
+
+
+def test_correcting_the_name_renames_not_forks():
+    """A number first met on this call: a later name corrects the record."""
+    _delete_user_by_phone(UNKNOWN_PHONE)
+    session = VoiceSession(caller_phone=UNKNOWN_PHONE)  # known_at_start=False
+    tools = {t.name: t for t in build_tools(session)}
+    try:
+        assert call(tools["set_caller_details"], name="Pria Test")["ok"]
+        assert call(tools["set_caller_details"], name="Priya Test")["ok"]
+        db = SessionLocal()
+        rows = db.query(User).filter(User.phone == UNKNOWN_PHONE).all()
+        assert len(rows) == 1, "a second record was created for the same number"
+        assert rows[0].name == "Priya Test"
+        assert session.patient_id == rows[0].id and session.booking_for is None
+        db.close()
+    finally:
+        _delete_user_by_phone(UNKNOWN_PHONE)
+
+
+def test_known_caller_booking_for_someone_else_files_under_owner(tools, session):
+    """Sanjay books for his mother: his record stays his, the note says who for."""
+    session.caller_phone = "9840012346"
+    session.known_at_start = True
+    assert call(tools["set_caller_details"], name="Lakshmi Kumar")["booking_for"] == "Lakshmi Kumar"
+
+    call(tools["search_doctors"], specialization="cardio")
+    doctor_id = sorted(session.offered_doctors)[0]
+    slots = call(tools["get_available_slots"], doctor_id=doctor_id,
+                 date=_next_working_day(7).isoformat())
+    slot_id = slots["slots"][-1]["slot_id"]
+    booked = call(tools["book_appointment"], slot_id=slot_id, reason="check-up")
+    try:
+        assert booked["booked"] is True
+        db = SessionLocal()
+        appt = db.get(Appointment, booked["appointment_id"])
+        owner = db.query(User).filter(User.phone == "9840012346").first()
+        assert appt.patient_id == owner.id, "booked under the wrong record"
+        assert owner.name == "Sanjay Kumar", "the owner's record was renamed"
+        assert "(for Lakshmi Kumar)" in appt.reason
+        db.close()
+    finally:
+        call(tools["cancel_appointment"], appointment_id=booked["appointment_id"])

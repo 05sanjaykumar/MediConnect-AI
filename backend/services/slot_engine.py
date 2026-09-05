@@ -161,31 +161,65 @@ def generate_for_day(db: Session, doctor: Doctor, day: date) -> int:
 
 
 def available_slots(db: Session, doctor: Doctor, day: date) -> list[Slot]:
-    """Slots a patient could actually book on this day, soonest first."""
-    generate_for_day(db, doctor, day)
+    """Slots a patient could actually book on this day, soonest first.
 
+    One round trip in the common case. Slots are only generated when the day
+    has none at all — and "none at all" is different from "none open", which
+    is why the first query fetches every state rather than just open ones.
+    """
     day_start, day_end = _day_bounds(day)
-    slots = db.scalars(
-        select(Slot)
-        .where(
-            Slot.doctor_id == doctor.id,
-            Slot.start_at >= day_start,
-            Slot.start_at < day_end,
-            Slot.state == "open",
+
+    def fetch() -> list[Slot]:
+        return list(
+            db.scalars(
+                select(Slot)
+                .where(
+                    Slot.doctor_id == doctor.id,
+                    Slot.start_at >= day_start,
+                    Slot.start_at < day_end,
+                )
+                .order_by(Slot.start_at)
+            ).all()
         )
-        .order_by(Slot.start_at)
-    ).all()
+
+    slots = fetch()
+    if not slots and generate_for_days(db, doctor, [day]):
+        slots = fetch()
 
     status = doctor.status.status if doctor.status else "available"
     now = datetime.now()
-    return [s for s in slots if is_slot_bookable(status, s.start_at, now)]
+    return [
+        s for s in slots
+        if s.state == "open" and is_slot_bookable(status, s.start_at, now)
+    ]
 
 
 def next_available(db: Session, doctor: Doctor, days_ahead: int = 7) -> Slot | None:
-    """The soonest bookable slot for this doctor, searching forward."""
+    """The soonest bookable slot for this doctor, searching forward.
+
+    Generates the whole window in one go and reads it back in one query,
+    rather than walking a day at a time.
+    """
     today = date.today()
-    for offset in range(days_ahead):
-        slots = available_slots(db, doctor, today + timedelta(days=offset))
-        if slots:
-            return slots[0]
+    days = [today + timedelta(days=i) for i in range(days_ahead)]
+    generate_for_days(db, doctor, days)
+
+    window_start, _ = _day_bounds(days[0])
+    _, window_end = _day_bounds(days[-1])
+    now = datetime.now()
+    status = doctor.status.status if doctor.status else "available"
+
+    for slot in db.scalars(
+        select(Slot)
+        .where(
+            Slot.doctor_id == doctor.id,
+            Slot.state == "open",
+            Slot.start_at > now,
+            Slot.start_at >= window_start,
+            Slot.start_at < window_end,
+        )
+        .order_by(Slot.start_at)
+    ):
+        if is_slot_bookable(status, slot.start_at, now):
+            return slot
     return None

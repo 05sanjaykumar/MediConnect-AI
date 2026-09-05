@@ -14,22 +14,31 @@ Two guardrails matter:
 2. Every write re-validates server-side. If the model hallucinates a slot id,
    booking.book raises and the model is told so, rather than silently creating
    a wrong appointment.
+
+And one rule about speed: the caller is on the line, silent, while a tool runs.
+Every database round trip is roughly half a second, so each tool is built to
+answer in as few as possible — and to answer the *next* question too, so the
+model doesn't have to call again.
 """
 
 import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.services.llm_service import FunctionCallParams
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from database import SessionLocal
 from models import Appointment, Doctor, User
 from services import booking
 from services.booking import BookingError
 from services.fallback import rank_alternates
-from services.slot_engine import available_slots
+from services.slot_engine import available_slots, generate_for_doctors, next_available
+
+PREFETCH_DAYS = 4  # after a search, warm this many days of slots in the background
 
 
 @dataclass
@@ -43,6 +52,12 @@ class VoiceSession:
     patient_id: int | None = None
     patient_name: str | None = None
     caller_phone: str | None = None
+    # Was this number already on record when the call started? Decides whether
+    # a name the caller gives us renames a record we just made, or means the
+    # booking is for someone other than the number's owner.
+    known_at_start: bool = False
+    # Set when a known caller books for another person ("for my mother").
+    booking_for: str | None = None
     offered_slots: set[int] = field(default_factory=set)
     offered_doctors: set[int] = field(default_factory=set)
 
@@ -58,7 +73,21 @@ class VoiceSession:
 
 def _speakable_time(moment: datetime) -> str:
     """A time a text-to-speech engine will read naturally."""
-    return moment.strftime("%A %d %B at %I:%M %p").replace(" 0", " ").replace("AM", "in the morning").replace("PM", "in the afternoon")
+    return (
+        moment.strftime("%A %d %B at %I:%M %p")
+        .replace(" 0", " ")
+        .replace("AM", "in the morning")
+        .replace("PM", "in the afternoon")
+    )
+
+
+def _speakable_day(day: date) -> str:
+    today = date.today()
+    if day == today:
+        return "today"
+    if day == today + timedelta(days=1):
+        return "tomorrow"
+    return day.strftime("%A %d %B").replace(" 0", " ")
 
 
 def _resolve_patient(db, session: VoiceSession) -> int:
@@ -74,10 +103,16 @@ def _resolve_patient(db, session: VoiceSession) -> int:
     if session.caller_phone:
         user = db.scalar(select(User).where(User.phone == session.caller_phone))
         if user is None:
+            if not session.patient_name:
+                raise BookingError(
+                    "NEED_NAME",
+                    "I don't have this caller's name yet. Ask for it, then call "
+                    "set_caller_details.",
+                )
             from security import hash_password
 
             user = User(
-                name=session.patient_name or f"Caller {session.caller_phone[-4:]}",
+                name=session.patient_name,
                 phone=session.caller_phone,
                 password_hash=hash_password("changeme"),
                 role="patient",
@@ -89,7 +124,26 @@ def _resolve_patient(db, session: VoiceSession) -> int:
         session.patient_name = user.name
         return user.id
 
-    raise BookingError("NO_CALLER", "I don't have your details on this call.")
+    raise BookingError(
+        "NEED_DETAILS",
+        "I don't know who is calling. Ask for their name and phone number, then "
+        "call set_caller_details.",
+    )
+
+
+# Names a model produces when it hasn't actually asked. Refusing these is what
+# forces the question to be put to the caller.
+PLACEHOLDER_NAMES = {
+    "patient", "caller", "customer", "user", "unknown", "guest", "someone",
+    "me", "myself", "n/a", "na", "none", "null", "test", "anonymous", "the patient",
+}
+
+
+def _looks_like_a_real_name(name: str) -> bool:
+    cleaned = " ".join(name.split()).strip(" .,'\"")
+    if len(cleaned) < 2 or cleaned.lower() in PLACEHOLDER_NAMES:
+        return False
+    return any(ch.isalpha() for ch in cleaned)
 
 
 def _parse_day(value: str | None) -> date:
@@ -105,6 +159,35 @@ def _parse_day(value: str | None) -> date:
         return date.fromisoformat(text)
     except ValueError:
         return date.today()
+
+
+def _load_doctor(db, doctor_id: int) -> Doctor | None:
+    """Doctor with user and status in a single round trip."""
+    return db.scalar(
+        select(Doctor)
+        .options(joinedload(Doctor.user), joinedload(Doctor.status))
+        .where(Doctor.id == doctor_id)
+    )
+
+
+def _prefetch_slots(doctor_ids: list[int]) -> None:
+    """Warm the next few days of slots for these doctors.
+
+    Runs in the background right after a search, so by the time the model asks
+    for times — a second or two later — the slots already exist and the lookup
+    is one query instead of three.
+    """
+    db = SessionLocal()
+    try:
+        doctors = list(db.scalars(select(Doctor).where(Doctor.id.in_(doctor_ids))).all())
+        days = [date.today() + timedelta(days=i) for i in range(PREFETCH_DAYS)]
+        made = generate_for_doctors(db, doctors, days)
+        if made:
+            logger.debug(f"Prefetched {made} slots for doctors {doctor_ids}")
+    except Exception as exc:  # never let a warm-up break the call
+        logger.warning(f"Slot prefetch failed: {exc}")
+    finally:
+        db.close()
 
 
 # ----------------------------------------------------------------------- tools
@@ -124,7 +207,11 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
         def work():
             db = SessionLocal()
             try:
-                query = select(Doctor).where(Doctor.is_active.is_(True))
+                query = (
+                    select(Doctor)
+                    .options(joinedload(Doctor.user), joinedload(Doctor.status))
+                    .where(Doctor.is_active.is_(True))
+                )
                 if specialization:
                     query = query.where(Doctor.specialization.ilike(f"%{specialization}%"))
                 if name:
@@ -143,20 +230,35 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                         "status": status.replace("_", " "),
                         "accepting_appointments": status == "available",
                     })
-                return out
+                departments: list[str] = []
+                if not out:
+                    # Tell the model what actually exists, so it doesn't guess
+                    # another name and call again.
+                    departments = list(
+                        db.scalars(
+                            select(Doctor.specialization).distinct().order_by(Doctor.specialization)
+                        ).all()
+                    )
+                return out, departments
             finally:
                 db.close()
 
-        doctors = await asyncio.to_thread(work)
+        doctors, departments = await asyncio.to_thread(work)
         session.remember_doctors(d["doctor_id"] for d in doctors)
 
         if not doctors:
             await params.result_callback({
                 "found": 0,
-                "message": "No doctors matched that. Ask the patient to name a "
-                           "department, or offer to list the departments.",
+                "departments_we_have": departments,
+                "message": "Nothing matched. Pick the closest department from "
+                           "departments_we_have and search again, or offer the "
+                           "list to the patient.",
             })
             return
+
+        # Warm the slots for these doctors while the model is still talking.
+        asyncio.create_task(asyncio.to_thread(_prefetch_slots, [d["doctor_id"] for d in doctors]))
+
         await params.result_callback({"found": len(doctors), "doctors": doctors})
 
     async def get_available_slots(params: FunctionCallParams):
@@ -172,21 +274,34 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
         def work():
             db = SessionLocal()
             try:
-                doctor = db.get(Doctor, doctor_id)
+                doctor = _load_doctor(db, doctor_id)
                 if doctor is None:
                     return None
-                slots = available_slots(db, doctor, day)
                 status = doctor.status.status if doctor.status else "available"
-                return {
+                slots = available_slots(db, doctor, day)
+                result = {
                     "doctor_name": doctor.user.name,
                     "status": status.replace("_", " "),
                     "date": day.isoformat(),
+                    "day": _speakable_day(day),
                     "slots": [
                         {"slot_id": s.id, "time": s.start_at.strftime("%I:%M %p").lstrip("0")}
                         for s in slots[:8]
                     ],
                     "total_available": len(slots),
                 }
+                if not slots:
+                    # Answer the follow-up question now, so the model doesn't
+                    # walk forward a day at a time asking again and again.
+                    soonest = next_available(db, doctor)
+                    if soonest is not None:
+                        result["next_available"] = {
+                            "date": soonest.start_at.date().isoformat(),
+                            "day": _speakable_day(soonest.start_at.date()),
+                            "slot_id": soonest.id,
+                            "time": soonest.start_at.strftime("%I:%M %p").lstrip("0"),
+                        }
+                return result
             finally:
                 db.close()
 
@@ -197,10 +312,18 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
 
         session.remember_slots(s["slot_id"] for s in result["slots"])
         if not result["slots"]:
-            result["message"] = (
-                f"{result['doctor_name']} has nothing free that day. Offer another "
-                "day, or another doctor in the same department."
-            )
+            nxt = result.get("next_available")
+            if nxt:
+                session.remember_slots([nxt["slot_id"]])
+                result["message"] = (
+                    f"Nothing free {result['day']}. The next opening is {nxt['day']} "
+                    f"at {nxt['time']} — offer that. Do not check other days."
+                )
+            else:
+                result["message"] = (
+                    f"{result['doctor_name']} has nothing in the next week. Offer "
+                    "another doctor in the same department."
+                )
         await params.result_callback(result)
 
     async def book_appointment(params: FunctionCallParams):
@@ -218,9 +341,14 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
             db = SessionLocal()
             try:
                 patient_id = _resolve_patient(db, session)
+                # A new name here, not `reason`: assigning to `reason` inside this
+                # closure would make it local to work() and shadow the outer value.
+                note = reason
+                if session.booking_for:
+                    note = f"{reason or 'Appointment'} (for {session.booking_for})"
                 appointment = booking.book(
                     db, patient_id=patient_id, slot_id=slot_id,
-                    created_via="voice", reason=reason,
+                    created_via="voice", reason=note,
                 )
                 return {
                     "booked": True,
@@ -240,6 +368,7 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                         )
                 return {
                     "booked": False,
+                    "code": err.code,
                     "reason": err.message,
                     "alternatives": [
                         {"slot_id": a["slot_id"], "doctor_name": a["doctor_name"],
@@ -257,7 +386,75 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                 "Apologise briefly, then offer the FIRST alternative only, in one "
                 "sentence, and ask if that works."
             )
+        elif result.get("code") in ("NEED_NAME", "NEED_DETAILS"):
+            result["instruction"] = (
+                "Do not book yet. Ask the caller's name (and phone number if you "
+                "don't have it), call set_caller_details, then book_appointment again "
+                "with the same slot_id."
+            )
         await params.result_callback(result)
+
+    async def set_caller_details(params: FunctionCallParams):
+        """Record who we're talking to. The only way an unknown caller gets a name."""
+        name = " ".join((params.arguments.get("name") or "").split())
+        phone = (params.arguments.get("phone") or "").strip() or None
+
+        if not _looks_like_a_real_name(name):
+            await params.result_callback({
+                "ok": False,
+                "error": "That isn't a name the caller gave you. Ask: \"May I have your "
+                         "name, please?\" and call this again with what they say.",
+            })
+            return
+        if phone:
+            session.caller_phone = phone
+        if not session.caller_phone:
+            await params.result_callback({
+                "ok": False,
+                "error": "Ask for the caller's phone number as well; I need it to file the booking.",
+            })
+            return
+
+        def work():
+            db = SessionLocal()
+            try:
+                user = db.scalar(select(User).where(User.phone == session.caller_phone))
+                if user is None:
+                    from security import hash_password
+
+                    user = User(
+                        name=name,
+                        phone=session.caller_phone,
+                        password_hash=hash_password("changeme"),
+                        role="patient",
+                    )
+                    db.add(user)
+                    db.commit()
+                    db.refresh(user)
+                    created = True
+                else:
+                    created = False
+                if user.name.lower() != name.lower():
+                    if session.known_at_start:
+                        # A known number, a different name: the owner is booking
+                        # for someone else. File it under the owner, note who
+                        # it's for. Never rename the owner's record.
+                        session.patient_id = user.id
+                        session.patient_name = user.name
+                        session.booking_for = name
+                        return {"ok": True, "account_holder": user.name, "booking_for": name}
+                    # A number we first met on this call, and the caller has now
+                    # told us (or corrected) their name: rename the record.
+                    user.name = name
+                    db.commit()
+                session.patient_id = user.id
+                session.patient_name = user.name
+                session.booking_for = None
+                return {"ok": True, "name": user.name, "new_patient": created}
+            finally:
+                db.close()
+
+        await params.result_callback(await asyncio.to_thread(work))
 
     async def list_my_appointments(params: FunctionCallParams):
         def work():
@@ -329,14 +526,14 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
     return [
         FunctionSchema(
             name="search_doctors",
-            description="Find doctors by specialization or name, with their live "
-                        "availability. Call this before naming any doctor.",
+            description="Find doctors by specialization or name, with live availability. "
+                        "On no match, returns our departments — pick the closest and retry.",
             properties={
                 "specialization": {
                     "type": "string",
-                    "description": "Department, e.g. Cardiology, Dermatology, "
-                                   "Pediatrics. Map symptoms yourself: chest pain "
-                                   "means Cardiology, a skin problem means Dermatology.",
+                    "description": "Department, e.g. Cardiology, Dermatology, Pediatrics, "
+                                   "General Medicine. Map symptoms yourself: chest pain → "
+                                   "Cardiology, skin → Dermatology, check-up → General Medicine.",
                 },
                 "name": {"type": "string", "description": "Part of the doctor's name."},
             },
@@ -345,16 +542,16 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
         ),
         FunctionSchema(
             name="get_available_slots",
-            description="List free appointment times for a doctor on a day. Call "
-                        "this before offering any time.",
+            description="Free times for a doctor on a day. If empty, includes "
+                        "next_available — offer that; don't check more days.",
             properties={
                 "doctor_id": {
                     "type": "integer",
-                    "description": "An id from search_doctors. Never invent one.",
+                    "description": "From search_doctors.",
                 },
                 "date": {
                     "type": "string",
-                    "description": "YYYY-MM-DD, or 'today' or 'tomorrow'. Defaults to today.",
+                    "description": "YYYY-MM-DD, 'today' or 'tomorrow'. Default today.",
                 },
             },
             required=["doctor_id"],
@@ -362,20 +559,30 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
         ),
         FunctionSchema(
             name="book_appointment",
-            description="Book a slot for this caller. Confirm the doctor, day and "
-                        "time with them before calling this.",
+            description="Book a slot for this caller after confirming doctor, day and time.",
             properties={
                 "slot_id": {
                     "type": "integer",
-                    "description": "An id from get_available_slots. Never invent one.",
+                    "description": "From get_available_slots.",
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Briefly, why they want to be seen.",
+                    "description": "Why they want to be seen, briefly.",
                 },
             },
             required=["slot_id"],
             handler=book_appointment,
+        ),
+        FunctionSchema(
+            name="set_caller_details",
+            description="Record the caller's spoken name (and phone if we lack it). "
+                        "Needed before booking an unknown number or for another person.",
+            properties={
+                "name": {"type": "string", "description": "Full name, as the caller said it."},
+                "phone": {"type": "string", "description": "Digits only; only if we don't have it."},
+            },
+            required=["name"],
+            handler=set_caller_details,
         ),
         FunctionSchema(
             name="list_my_appointments",
@@ -390,7 +597,7 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
             properties={
                 "appointment_id": {
                     "type": "integer",
-                    "description": "An id from list_my_appointments.",
+                    "description": "From list_my_appointments.",
                 },
             },
             required=["appointment_id"],
@@ -398,8 +605,8 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
         ),
         FunctionSchema(
             name="get_hospital_info",
-            description="Departments, how many doctors are in each, fees and "
-                        "opening hours.",
+            description="Departments, doctor counts, fees, opening hours. General "
+                        "questions only — not needed before a search.",
             properties={},
             required=[],
             handler=get_hospital_info,
