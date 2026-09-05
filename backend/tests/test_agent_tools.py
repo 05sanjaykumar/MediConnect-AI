@@ -535,3 +535,49 @@ def test_name_only_asks_for_the_number_next():
     assert result["ok"] is False
     assert result.get("name_recorded") == "Sanjay"
     assert "phone number" in result["error"]
+
+
+# --------------------------------------------------- browser = unknown caller
+
+
+def test_browser_without_caller_id_behaves_like_an_unknown_phone_caller():
+    """No ?phone= → synthetic caller id, asked for a name only, never a number."""
+    from routes.audio import identify_caller
+    from agents.prompt import greeting_for, build_system_prompt
+
+    session = identify_caller(None)
+    assert session.caller_phone and session.caller_phone.startswith("web-")
+    assert session.patient_id is None and session.known_at_start is False
+
+    greeting = greeting_for(session)
+    assert "name" in greeting and "phone" not in greeting.lower()
+    assert "phone number" not in build_system_prompt(session).split("WHO IS CALLING")[1].split("SPEAKING")[0].lower() \
+        or "not on record" in build_system_prompt(session)
+
+
+def test_browser_caller_books_after_giving_only_a_name():
+    from routes.audio import identify_caller
+
+    session = identify_caller(None)
+    synthetic = session.caller_phone
+    tools = {t.name: t for t in build_tools(session)}
+    try:
+        details = call(tools["set_caller_details"], name="Browser Tester")
+        assert details["ok"] is True and details["new_patient"] is True
+        assert "phone_spoken" not in details, "a synthetic id must not be read aloud"
+
+        call(tools["search_doctors"], specialization="cardio")
+        doctor_id = sorted(session.offered_doctors)[0]
+        slots = call(tools["get_available_slots"], doctor_id=doctor_id,
+                     date=_next_working_day(9).isoformat())
+        booked = call(tools["book_appointment"], slot_id=slots["slots"][-1]["slot_id"])
+        assert booked["booked"] is True
+
+        db = SessionLocal()
+        user = db.query(User).filter(User.phone == synthetic).first()
+        assert user is not None and user.name == "Browser Tester"
+        appt = db.get(Appointment, booked["appointment_id"])
+        assert appt.patient_id == user.id
+        db.close()
+    finally:
+        _delete_user_by_phone(synthetic)
