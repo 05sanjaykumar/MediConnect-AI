@@ -542,13 +542,12 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                 session.patient_id = user.id
                 session.patient_name = user.name
                 session.booking_for = None
-                return {
-                    "ok": True,
-                    "name": user.name,
-                    "new_patient": created,
-                    # If you repeat the number back, say it exactly like this.
-                    "phone_spoken": _spoken_digits(session.caller_phone),
-                }
+                result = {"ok": True, "name": user.name, "new_patient": created}
+                # If you repeat the number back, say it exactly like this. A
+                # browser session has a synthetic id, not a number — nothing to say.
+                if session.caller_phone.isdigit():
+                    result["phone_spoken"] = _spoken_digits(session.caller_phone)
+                return result
             finally:
                 db.close()
 

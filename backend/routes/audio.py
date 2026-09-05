@@ -7,6 +7,8 @@ VoiceSession — that is what ties a booking to a caller, and what stops the
 model booking a slot it was never offered.
 """
 
+import uuid
+
 from fastapi import APIRouter, Query, WebSocket
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -62,13 +64,18 @@ def health():
 def identify_caller(phone: str | None) -> VoiceSession:
     """Work out who is calling, from their number.
 
-    A browser caller has no phone number of their own, so the frontend passes
-    one. An unknown number is still a valid caller — the booking tools create a
-    patient record for them rather than refusing the call.
+    On a phone call the number arrives with the call (caller ID), so a patient
+    is never asked for it: a known number is greeted by name, an unknown one is
+    asked for a name only. The browser has no caller ID, so it gets a synthetic
+    one and behaves exactly like a call from an unknown number. Pass ?phone= to
+    simulate a known caller instead.
     """
-    session = VoiceSession(caller_phone=phone)
     if not phone:
-        return session
+        phone = f"web-{uuid.uuid4().hex[:8]}"
+        logger.info(f"Browser call with no caller ID; using synthetic id {phone}")
+        return VoiceSession(caller_phone=phone)
+
+    session = VoiceSession(caller_phone=phone)
 
     db = SessionLocal()
     try:
