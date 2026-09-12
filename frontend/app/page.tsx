@@ -2,6 +2,7 @@
 
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { PipecatClient } from "@pipecat-ai/client-js";
 import {
@@ -106,13 +107,21 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0f0f0f] text-white flex flex-col items-center justify-center px-4">
+      {/* The dashboards live on the light side of the app; this is the call screen. */}
+      <Link
+        href="/login"
+        className="absolute right-5 top-5 rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 transition hover:border-zinc-500 hover:text-white"
+      >
+        Dashboard
+      </Link>
+
       {/* Header */}
       <div className="mb-12 text-center">
         <h1 className="text-3xl font-semibold tracking-tight text-white">
-          Voice AI
+          MediConnect <span className="text-teal-400">AI</span>
         </h1>
         <p className="text-sm text-zinc-500 mt-1">
-          Low-latency voice agent · Single environment
+          Book an appointment by talking · Pipecat · Groq · Kokoro
         </p>
       </div>
 
