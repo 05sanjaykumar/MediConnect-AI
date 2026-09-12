@@ -147,6 +147,16 @@ async def voice_websocket(
     async def _greet(transport, websocket):
         await task.queue_frames([TTSSpeakFrame(greeting_for(session))])
 
+    # Without this the pipeline keeps running after the caller hangs up:
+    # PipelineRunner.run() never returns, so the finally block below never
+    # fires and the call stays in ACTIVE_CALLS forever. That matters because
+    # ACTIVE_CALLS is what a doctor's status change looks through to find the
+    # calls it affects — a stale entry is a frame pushed into a dead pipeline.
+    @transport.event_handler("on_client_disconnected")
+    async def _hangup(transport, websocket):
+        logger.info("Caller disconnected; ending the pipeline")
+        await task.cancel()
+
     call_id = f"web:{id(websocket)}"
     ACTIVE_CALLS[call_id] = (session, task)
     logger.info(f"Call {call_id} started ({len(ACTIVE_CALLS)} active)")

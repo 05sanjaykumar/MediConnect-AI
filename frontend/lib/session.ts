@@ -29,6 +29,8 @@ export interface Session {
   userId: number;
   name: string;
   role: Role;
+  /** The caller id a voice call arrives with. Ties a booking to this patient. */
+  phone?: string;
   /** Only for doctor accounts — needed to change their own status. */
   doctorId?: number;
   specialization?: string;
@@ -84,6 +86,7 @@ export function saveSession(login: LoginResult, profile?: Profile): Session {
     userId: login.user_id,
     name: login.name,
     role: login.role,
+    phone: profile?.phone,
     doctorId: profile?.doctor_id,
     specialization: profile?.specialization,
   };
@@ -107,6 +110,18 @@ export function homeFor(role: Role): string {
   if (role === "doctor") return "/doctor";
   if (role === "admin") return "/admin";
   return "/patient";
+}
+
+/**
+ * Read the session without requiring one.
+ *
+ * For pages that work either way — the voice screen is usable signed out, it
+ * just becomes a call from an unknown number. `undefined` while hydrating.
+ */
+export function useOptionalSession() {
+  const hydrated = useSyncExternalStore(neverChanges, clientTrue, serverFalse);
+  const session = useSyncExternalStore(subscribe, readSession, serverSnapshot);
+  return hydrated ? session : undefined;
 }
 
 /**

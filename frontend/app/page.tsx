@@ -3,7 +3,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useOptionalSession } from "@/lib/session";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { PipecatClient } from "@pipecat-ai/client-js";
 import {
   WebSocketTransport,
@@ -21,8 +22,19 @@ export default function Home() {
 
   const isConnectedRef = useRef(false);
 
-  const WS_URL =
-    process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000/api/ws/voice";
+  const session = useOptionalSession();
+
+  // A real phone call arrives with caller ID. The browser has none, so if
+  // someone is signed in we pass their number — the agent then greets them by
+  // name and files the booking against their record, which is what makes a
+  // voice booking show up in their dashboard. Signed out, it stays an
+  // anonymous call and the agent asks who it's speaking to.
+  const WS_URL = useMemo(() => {
+    const base =
+      process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000/api/ws/voice";
+    if (!session?.phone || base.includes("phone=")) return base;
+    return `${base}${base.includes("?") ? "&" : "?"}phone=${encodeURIComponent(session.phone)}`;
+  }, [session?.phone]);
 
   const initClient = useCallback(() => {
     const client = new PipecatClient({
@@ -122,6 +134,13 @@ export default function Home() {
         </h1>
         <p className="text-sm text-zinc-500 mt-1">
           Book an appointment by talking · Pipecat · Groq · Kokoro
+        </p>
+        <p className="mt-3 text-xs text-zinc-600">
+          {session === undefined
+            ? "\u00a0"
+            : session?.phone
+              ? `Calling as ${session.name} · ${session.phone}`
+              : "Calling as an unknown number — the agent will ask your name"}
         </p>
       </div>
 

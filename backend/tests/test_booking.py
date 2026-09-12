@@ -98,18 +98,25 @@ def test_past_slots_are_never_offered(db, doctor):
 # ------------------------------------------------------------- status blocking
 
 
-def test_in_surgery_blocks_the_rest_of_the_day():
-    tomorrow_9am = datetime.now().replace(hour=9, minute=0) + timedelta(days=1)
-    in_an_hour = datetime.now() + timedelta(hours=1)
+# These pin the clock rather than using datetime.now(). "In an hour" crosses
+# midnight if the suite runs after 23:00, and a slot tomorrow is legitimately
+# bookable when the doctor is only in surgery for the rest of today — so the
+# unpinned version failed every night.
+MIDMORNING = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
 
-    assert is_slot_bookable("in_surgery", in_an_hour) is False
-    assert is_slot_bookable("in_surgery", tomorrow_9am) is True  # tomorrow is fine
-    assert is_slot_bookable("available", in_an_hour) is True
+
+def test_in_surgery_blocks_the_rest_of_the_day():
+    later_today = MIDMORNING + timedelta(hours=1)
+    tomorrow_9am = (MIDMORNING + timedelta(days=1)).replace(hour=9)
+
+    assert is_slot_bookable("in_surgery", later_today, MIDMORNING) is False
+    assert is_slot_bookable("in_surgery", tomorrow_9am, MIDMORNING) is True
+    assert is_slot_bookable("available", later_today, MIDMORNING) is True
 
 
 def test_on_break_blocks_only_half_an_hour():
-    assert is_slot_bookable("on_break", datetime.now() + timedelta(minutes=10)) is False
-    assert is_slot_bookable("on_break", datetime.now() + timedelta(minutes=45)) is True
+    assert is_slot_bookable("on_break", MIDMORNING + timedelta(minutes=10), MIDMORNING) is False
+    assert is_slot_bookable("on_break", MIDMORNING + timedelta(minutes=45), MIDMORNING) is True
 
 
 # -------------------------------------------------------------------- booking
