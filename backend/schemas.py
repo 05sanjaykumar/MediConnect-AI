@@ -171,3 +171,11 @@ class AdminOverview(BaseModel):
     appointments_today: int
     booked_by_voice: int
     booked_by_web: int
+
+
+class DoctorQueue(BaseModel):
+    """How many patients are waiting for a doctor, and when the next one is."""
+
+    doctor_id: int
+    upcoming: int
+    next_at: datetime | None

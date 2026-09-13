@@ -23,16 +23,19 @@ the agent can search and book rather than only converse.
 
 | Working | Not built yet |
 |---|---|
-| Auth with patient / doctor / admin roles | Voice agent tool calling |
+| Auth with patient / doctor / admin roles | **Mid-call interrupt** (doctor's status change reaching a live call) |
 | Doctor search with live status | Twilio phone layer |
-| Slot generation from working hours | Status change → automatic slot blocking |
-| Book · cancel · reschedule | Live dashboard updates (Supabase Realtime) |
-| Ranked alternates when booking fails | Patient / doctor / admin dashboards |
-| Concurrency-safe booking (proven by test) | |
-| Admin: manage doctors and schedules | |
+| Slot generation, status changes block/release slots | "Seen" / "No show" for past appointments |
+| Book · cancel · reschedule, ranked alternates | Sign-out on expired token |
+| Concurrency-safe booking (proven by test) | Voice call idle timeout |
+| Voice agent books by browser mic, greets and identifies the caller | |
+| Patient / doctor / admin dashboards, live availability via Supabase Realtime | |
+| Admin queue: who is waiting for which doctor | |
 
-> `PLAN.md` is the original design document. Several decisions have changed since it was
-> written — Redis and the custom WebSocket hub are out, Alembic and Supabase Realtime are in.
+> **Working on this with an AI assistant?** Start with [`CLAUDE.md`](CLAUDE.md) — it has the design
+> decisions, gotchas and what's left, and is kept more current than this file.
+>
+> `PLAN.md` is the original design document; several decisions have since changed.
 
 ---
 
@@ -105,15 +108,18 @@ cd backend && .venv/bin/python seed.py
 12 doctors across 6 specializations, their weekly schedules, 5 patients and an admin. Add
 `--reset` to wipe and rebuild.
 
-### 5. Frontend (optional for now)
+### 5. Frontend
 
 ```bash
 cd frontend && npm install
 ```
 
 ```bash
-echo "NEXT_PUBLIC_BACKEND_WS_URL=ws://localhost:8000/api/ws/voice" > frontend/.env.local
+cp frontend/.example.env frontend/.env.local
 ```
+
+Fill in the Supabase URL and publishable key — without them the dashboards still work but
+doctor status won't update live.
 
 ---
 

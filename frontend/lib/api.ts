@@ -97,6 +97,21 @@ export interface AdminOverview {
   booked_by_web: number;
 }
 
+export interface DoctorQueue {
+  doctor_id: number;
+  upcoming: number;
+  next_at: string | null;
+}
+
+export type AppointmentScope = "upcoming" | "past" | "all";
+
+export interface AppointmentFilter {
+  scope?: AppointmentScope;
+  status?: "confirmed" | "cancelled" | "completed" | "no_show";
+  doctorId?: number;
+  limit?: number;
+}
+
 export interface LoginResult {
   access_token: string;
   token_type: string;
@@ -271,8 +286,16 @@ export const api = {
 
   allDoctors: (token: string) => request<Doctor[]>("/admin/doctors", { token }),
 
-  allAppointments: (token: string, limit = 100) =>
-    request<Appointment[]>(`/admin/appointments?limit=${limit}`, { token }),
+  allAppointments: (token: string, filter: AppointmentFilter = {}) => {
+    const query = new URLSearchParams({ limit: String(filter.limit ?? 100) });
+    if (filter.scope) query.set("scope", filter.scope);
+    if (filter.status) query.set("status", filter.status);
+    if (filter.doctorId) query.set("doctor_id", String(filter.doctorId));
+    return request<Appointment[]>(`/admin/appointments?${query}`, { token });
+  },
+
+  /** Confirmed upcoming appointments per doctor — who has patients waiting. */
+  queue: (token: string) => request<DoctorQueue[]>("/admin/queue", { token }),
 
   workingHours: (doctorId: number, token: string) =>
     request<WorkingHour[]>(`/admin/doctors/${doctorId}/working-hours`, { token }),
