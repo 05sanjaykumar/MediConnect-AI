@@ -187,16 +187,17 @@ can be open side by side for the live-status demo.
 
 ## Git / GitHub
 
-- Repo `05sanjaykumar/MediConnect-AI`. PRs #1–#5 merged (config, voice tools, latency+identity,
-  phone guard, never-ask-phone).
-- The machine has **two GitHub accounts** in `gh`. Pushing needs the owner account and bypassing the
-  keychain credential:
+- Repo `05sanjaykumar/MediConnect-AI`. PRs #1–#6 merged (config, voice tools, latency+identity,
+  phone guard, never-ask-phone, dashboards). `main` is up to date; nothing outstanding.
+- The machine has **two GitHub accounts** in `gh`. As of 13 Oct 2026 the active one is
+  **`sanjaysk2004`**, which the owner has added as a collaborator — `push: true`, `admin: false`.
+  Pushing works directly; no account switch needed. If a push 403s, bypass the keychain credential:
   ```bash
-  gh auth switch --user 05sanjaykumar
   git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin <branch>
   ```
-- **As of 13 Sep 2026 the user asked for local commits only, no push** (they were on another account).
-  Branch `feat/dashboards` holds the dashboard work, committed locally. Nothing pushed.
+  Because `admin` is false, this account cannot merge its own PRs or change settings — the owner does that.
+- Commits are authored as `05sanjaykumar <sanjay@testautomate.ai>` regardless of which `gh` account is
+  active; GitHub attributes by email, so commit history is **not** evidence of push access.
 - Commit trailer: `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
 
 ---
@@ -212,11 +213,14 @@ can be open side by side for the live-status demo.
   History tab has past / cancelled / all
 - 40 backend tests
 
-**Last session ended with** (13 Sep 2026, committed on `feat/dashboards`, not pushed)
+**Last session ended with** (13 Oct 2026, all on `main`, pushed)
 - `tests/conftest.py` leave-no-trace fixture — verified: DB counts identical before and after a full
   40-test run
 - Admin queue view (`scope` param, `/admin/queue`, joinedload in admin and booking lists)
-- This file, and a refreshed README status
+- PR #6 merged, which brought the dashboards onto `main`
+- A full technical rewrite of `README.md` — architecture, data model, the concurrency guarantee, block
+  windows, fallback weights, voice guard rails, the 25 endpoints, setup, and measured latency numbers.
+  It is the document for the panel; **this file** stays the one for the next AI session.
 
 **Not built — in priority order**
 1. **Mid-call interrupt** — the project's novelty claim. `ACTIVE_CALLS` (in `routes/audio.py`) is populated
