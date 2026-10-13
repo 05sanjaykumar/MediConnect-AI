@@ -221,11 +221,19 @@ UNKNOWN_PHONE = "9111100001"
 
 
 def _delete_user_by_phone(phone: str) -> None:
+    from models import Slot
+
     db = SessionLocal()
     try:
         u = db.query(User).filter(User.phone == phone).first()
         if u:
             for a in db.query(Appointment).filter(Appointment.patient_id == u.id).all():
+                # Release the slot first. Deleting the appointment alone left
+                # the slot `booked` with nothing behind it — hidden from every
+                # patient, permanently. 33 of those had built up.
+                slot = db.get(Slot, a.slot_id)
+                if slot is not None and slot.state == "booked":
+                    slot.state = "open"
                 db.delete(a)
             db.delete(u)
             db.commit()

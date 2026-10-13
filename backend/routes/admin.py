@@ -5,10 +5,11 @@ Everything here requires an admin account.
 """
 
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from deps import require_role
@@ -16,6 +17,7 @@ from models import Appointment, Doctor, DoctorStatus, Slot, User, WorkingHour
 from schemas import (
     AdminOverview,
     AppointmentOut,
+    DoctorQueue,
     DoctorCreate,
     DoctorOut,
     DoctorUpdate,
@@ -62,7 +64,9 @@ def _to_out(doctor: Doctor) -> DoctorOut:
 @router.get("/doctors", response_model=list[DoctorOut])
 def list_all_doctors(include_inactive: bool = True, db: Session = Depends(get_db)):
     """Every doctor, including deactivated ones — unlike the public search."""
-    query = select(Doctor)
+    # Name and status are on other tables. Loading them per doctor was two
+    # round trips each — about eleven seconds for twelve doctors.
+    query = select(Doctor).options(joinedload(Doctor.user), joinedload(Doctor.status))
     if not include_inactive:
         query = query.where(Doctor.is_active.is_(True))
     return [_to_out(d) for d in db.scalars(query).all()]
@@ -216,13 +220,29 @@ def set_working_hours(
 def all_appointments(
     doctor_id: int | None = None,
     status: str | None = Query(default=None),
+    scope: Literal["upcoming", "past", "all"] = Query(
+        default="all",
+        description="upcoming: soonest first. past and all: most recent first.",
+    ),
     on: date | None = None,
     limit: int = Query(default=100, le=500),
     db: Session = Depends(get_db),
 ):
     from routes.appointments import _to_out as appointment_out
 
-    query = select(Appointment).join(Slot, Slot.id == Appointment.slot_id)
+    now = datetime.now()
+    query = (
+        select(Appointment)
+        .join(Slot, Slot.id == Appointment.slot_id)
+        # The serializer reads the patient, the doctor's name and the slot for
+        # every row. Lazily that was three or four extra round trips per row —
+        # at ~0.46s each to Supabase, a 100-row page took well over a minute.
+        .options(
+            joinedload(Appointment.slot),
+            joinedload(Appointment.patient),
+            joinedload(Appointment.doctor).joinedload(Doctor.user),
+        )
+    )
     if doctor_id:
         query = query.where(Appointment.doctor_id == doctor_id)
     if status:
@@ -231,8 +251,35 @@ def all_appointments(
         day_start = datetime.combine(on, datetime.min.time())
         query = query.where(Slot.start_at >= day_start, Slot.start_at < day_start + timedelta(days=1))
 
-    rows = db.scalars(query.order_by(Slot.start_at.desc()).limit(limit)).all()
+    if scope == "upcoming":
+        # The waiting queue reads top to bottom: next patient first.
+        query = query.where(Slot.start_at >= now).order_by(Slot.start_at.asc())
+    elif scope == "past":
+        query = query.where(Slot.start_at < now).order_by(Slot.start_at.desc())
+    else:
+        query = query.order_by(Slot.start_at.desc())
+
+    rows = db.scalars(query.limit(limit)).unique().all()
     return [appointment_out(a) for a in rows]
+
+
+@router.get("/queue", response_model=list[DoctorQueue])
+def doctor_queues(db: Session = Depends(get_db)):
+    """Confirmed upcoming appointments per doctor, in one aggregate query."""
+    rows = db.execute(
+        select(
+            Appointment.doctor_id,
+            func.count(Appointment.id),
+            func.min(Slot.start_at),
+        )
+        .join(Slot, Slot.id == Appointment.slot_id)
+        .where(Appointment.status == "confirmed", Slot.start_at >= datetime.now())
+        .group_by(Appointment.doctor_id)
+    ).all()
+    return [
+        DoctorQueue(doctor_id=doctor_id, upcoming=count, next_at=next_at)
+        for doctor_id, count, next_at in rows
+    ]
 
 
 # -------------------------------------------------------------------- overview

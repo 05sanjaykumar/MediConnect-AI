@@ -166,17 +166,28 @@ def reschedule(db: Session, appointment_id: int, new_slot_id: int) -> Appointmen
     return replacement
 
 
+# Everything the API serializer reads from an appointment, loaded with it.
+# Lazily it was a round trip per row per relationship — the patient's and the
+# doctor's "my appointments" lists got slower with every booking.
+_LIST_LOADS = (
+    joinedload(Appointment.slot),
+    joinedload(Appointment.patient),
+    joinedload(Appointment.doctor).joinedload(Doctor.user),
+)
+
+
 def appointments_for_patient(
     db: Session, patient_id: int, include_past: bool = False
 ) -> list[Appointment]:
     query = (
         select(Appointment)
         .join(Slot, Slot.id == Appointment.slot_id)
+        .options(*_LIST_LOADS)
         .where(Appointment.patient_id == patient_id)
     )
     if not include_past:
         query = query.where(Appointment.status == "confirmed", Slot.start_at >= datetime.now())
-    return list(db.scalars(query.order_by(Slot.start_at)).all())
+    return list(db.scalars(query.order_by(Slot.start_at)).unique().all())
 
 
 def appointments_for_doctor(
@@ -185,8 +196,9 @@ def appointments_for_doctor(
     query = (
         select(Appointment)
         .join(Slot, Slot.id == Appointment.slot_id)
+        .options(*_LIST_LOADS)
         .where(Appointment.doctor_id == doctor_id)
     )
     if not include_past:
         query = query.where(Appointment.status == "confirmed", Slot.start_at >= datetime.now())
-    return list(db.scalars(query.order_by(Slot.start_at)).all())
+    return list(db.scalars(query.order_by(Slot.start_at)).unique().all())
