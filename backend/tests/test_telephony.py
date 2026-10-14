@@ -159,3 +159,37 @@ def test_status_is_complete_once_everything_is_set(monkeypatch):
     assert status["configured"] is True
     assert status["webhook_url"] == "https://example.ngrok-free.app/api/twilio/voice"
     assert status["stream_url"] == "wss://example.ngrok-free.app/api/twilio/stream"
+
+
+# ------------------------------------------------------------- SIP callers
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("sip:9840012346@mediconnect-097e72.sip.twilio.com", "9840012346"),
+        ("sips:9840012347@example.sip.twilio.com", "9840012347"),
+        ("sip:sanjay@example.sip.twilio.com", "sanjay"),
+        ("+918072348791", "+918072348791"),   # a PSTN call is left alone
+        ("", ""),
+    ],
+)
+def test_sip_uri_is_reduced_to_the_caller(value, expected):
+    assert telephony._caller_id(value) == expected
+
+
+def test_sip_call_identifies_the_patient_not_the_domain():
+    """The domain half of a SIP URI contains digits. Passing the whole URI to
+    the caller lookup would mix them into the phone number and match nobody."""
+    xml = twiml(Direction="inbound",
+                From="sip:9840012346@mediconnect-097e72.sip.twilio.com",
+                To="sip:book@mediconnect-097e72.sip.twilio.com")
+    assert 'name="caller" value="9840012346"' in xml
+    assert "097e72" not in xml.split('name="caller"')[1][:40]
+
+
+def test_sip_caller_reaches_the_same_patient_record():
+    session = identify_caller(telephony._caller_id(
+        "sip:9840012346@mediconnect-097e72.sip.twilio.com"))
+    assert session.known_at_start is True
+    assert session.patient_name == "Sanjay Kumar"

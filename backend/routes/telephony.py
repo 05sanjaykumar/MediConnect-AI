@@ -85,6 +85,23 @@ def _twilio_client() -> Client:
     return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 
+def _caller_id(value: str) -> str:
+    """Normalise whatever Twilio put in From/To into something identifiable.
+
+    A PSTN call gives a plain number. A SIP call gives a URI —
+    `sip:9840012346@mediconnect-097e72.sip.twilio.com` — and the host half is
+    poison: it contains digits, so handing the whole URI to the caller lookup
+    would mix the domain's digits into the phone number and match nobody.
+    Take the user part and leave the rest.
+    """
+    value = (value or "").strip()
+    if value.lower().startswith(("sip:", "sips:")):
+        value = value.split(":", 1)[1]
+    if "@" in value:
+        value = value.split("@", 1)[0]
+    return value
+
+
 # --------------------------------------------------------------- the webhook
 
 
@@ -102,9 +119,11 @@ async def voice_webhook(request: Request):
     """
     form = await request.form()
     direction = str(form.get("Direction", "inbound"))
-    caller = str(form.get("To" if direction.startswith("outbound") else "From", ""))
+    raw = str(form.get("To" if direction.startswith("outbound") else "From", ""))
+    caller = _caller_id(raw)
     call_sid = str(form.get("CallSid", ""))
-    logger.info(f"TwiML requested: {direction} call {call_sid} with {caller}")
+    channel = "sip" if raw.lower().startswith(("sip:", "sips:")) else "pstn"
+    logger.info(f"TwiML requested: {direction} {channel} call {call_sid} with {caller}")
 
     response = VoiceResponse()
     connect = Connect()
