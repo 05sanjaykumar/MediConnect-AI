@@ -24,7 +24,7 @@ agent can search and book rather than only converse.
 - [What it does](#what-it-does) · [Architecture](#architecture) · [Stack](#stack)
 - [How it works](#how-it-works) — [data model](#data-model), [slot engine](#the-slot-engine),
   [booking](#booking-and-the-concurrency-guarantee), [status](#doctor-status--availability),
-  [fallback](#the-fallback-ranking), [voice](#the-voice-agent), [live updates](#live-availability)
+  [fallback](#the-fallback-ranking), [voice](#the-voice-agent), [phone](#the-phone-channel), [live updates](#live-availability)
 - [Setup](#setup) · [Running](#running) · [Demo accounts](#demo-accounts) · [API](#api)
 - [Testing](#testing) · [Engineering notes](#engineering-notes) · [Status](#status)
 
@@ -92,7 +92,7 @@ constraints as one made in the browser. There is no second code path to keep in 
 | Language model | Groq `openai/gpt-oss-120b` | Fast tool calling; ~0.13s to first token |
 | Text-to-speech | Kokoro (local ONNX) | Runs on-device, no per-word cost |
 | Turn-taking | Silero VAD + 0.8s speech timeout | See [engineering notes](#engineering-notes) |
-| Telephony | Pipecat WebSocket transport (Twilio planned) | Same pipeline, different serializer |
+| Telephony | Twilio Media Streams (8 kHz mu-law) | Same pipeline, different serializer |
 | Frontend | Next.js 16, React 19.2, Tailwind 4 | App Router, all dashboards are client components |
 
 ---
@@ -235,6 +235,44 @@ voice booking lands on their record.
 so the caller hears a voice within a second — and the same line is written into the conversation as the
 assistant's opening so the model doesn't introduce itself twice.
 
+### The phone channel
+
+A real call reaches the same agent. Twilio answers, asks `/api/twilio/voice` what to do, and gets back
+TwiML that opens a bidirectional media stream to `/api/twilio/stream`. From `build_pipeline` onwards
+nothing differs from a browser call — only the transport and the serializer change.
+
+```
+caller ──PSTN── Twilio ──WS(8kHz mu-law)── /api/twilio/stream ── the same pipeline
+```
+
+Three things telephony forces that the browser hides:
+
+- **A phone sends no speech events.** The browser client runs voice activity detection in the page and
+  tells us when the caller starts and stops; a telephone sends only audio. The phone path therefore
+  builds its own analyzer — without one the agent never decides the caller has finished.
+- **A real call presents E.164** (`+919840012346`) while patients are stored as the ten digits they'd
+  actually give you. `identify_caller` falls back to matching the national number, or every phone
+  caller is a stranger.
+- **Who the patient is depends on direction.** Inbound, they dialled us, so they are `From`. Outbound,
+  we dialled them, so they are `To` — `From` is our own number and identifies nobody.
+
+Testing it needn't cost anything. `tools/fake_twilio_call.py` speaks Twilio's media-stream protocol
+directly, so the whole inbound path can be exercised locally — no number, no tunnel, no call charges:
+
+```bash
+python tools/fake_twilio_call.py --caller +919840012346 --speech /tmp/question.wav
+```
+
+That run is how the phone path was verified: the agent recognised the caller by name, the transcript
+came back as *"I need to see a cardiologist / what times are available tomorrow morning"*, the model
+called `search_doctors`, and 14.3 seconds of 8 kHz speech came back down the wire.
+
+**Setting it up for real** needs a Twilio number whose voice webhook points at this server, and a
+public URL — `ngrok http 8000` in development, with the host (no scheme) in `PUBLIC_HOST`. A free
+ngrok URL changes on every restart, so both that variable and the number's webhook have to be
+re-pointed each time. On a Twilio trial account the caller first hears a "you have a trial account"
+notice and must press a key before your TwiML runs at all.
+
 ### Live availability
 
 The browser subscribes **directly to Supabase Realtime** on `doctor_status`. There is no WebSocket hub
@@ -373,7 +411,12 @@ GET    /api/admin/doctors/{id}/working-hours
 PUT    /api/admin/doctors/{id}/working-hours     replace the week
 
 GET    /api/health                               includes active voice calls
-WS     /api/ws/voice?phone=<caller id>           voice pipeline
+WS     /api/ws/voice?phone=<caller id>           voice pipeline (browser)
+
+POST   /api/twilio/voice                         TwiML — Twilio asks what to do with a call
+WS     /api/twilio/stream                        the call's audio, both ways
+POST   /api/twilio/call                          ring a patient and connect them   (admin)
+GET    /api/twilio/status                        what telephony has, and what it's missing
 ```
 
 Roles are enforced server-side: a patient token on an admin route gets `403`, no token `401`.
@@ -394,7 +437,7 @@ Roles are enforced server-side: a patient token on an admin route gets `403`, no
 ## Testing
 
 ```bash
-cd backend && .venv/bin/python -m pytest tests -q        # 40 tests, 5–8 min
+cd backend && .venv/bin/python -m pytest tests -q        # 55 tests, 9–10 min
 ```
 
 Takes minutes because every query is a real round trip to a hosted database.
@@ -403,6 +446,7 @@ Takes minutes because every query is a real round trip to a hosted database.
 |---|---|
 | `tests/test_booking.py` (9) | Slot generation is idempotent, past slots are never offered, status blocking windows, book/cancel, **the 30-way concurrency test** |
 | `tests/test_agent_tools.py` (31) | Every voice tool, the id whitelist, invented names and phone numbers, caller identity, cancelling someone else's appointment, TTS chunking |
+| `tests/test_telephony.py` (15) | TwiML for inbound and outbound, the caller the number resolves to, E.164 → patient matching, Twilio's connected/start handshake, configuration reporting |
 
 The suite runs against the **real** database, so `tests/conftest.py` snapshots the highest ids and the
 booked slots before each test and removes anything created afterwards. Row counts are identical before
@@ -445,18 +489,19 @@ model 404'd. Model names now come from the environment; swapping one is a one-li
 Auth and roles · doctor search with live status · slot generation · book / cancel / reschedule ·
 ranked alternates · the concurrency guarantee · admin management · status changes blocking and
 releasing slots · voice agent booking by browser microphone with caller identity and guard rails ·
-patient, doctor and admin dashboards · live availability via Supabase Realtime · 40 tests
+patient, doctor and admin dashboards · live availability via Supabase Realtime ·
+**booking by telephone through Twilio** · 55 tests
 
 **Not built yet**
 
 1. **Mid-call interrupt** — a doctor's status change reaching a call *in progress*, so the agent
    apologises and offers an alternative mid-sentence. The call registry exists; nothing reads it yet.
    This is the project's main contribution and the next piece of work.
-2. **Twilio** — a real phone number instead of the browser microphone. Same pipeline, 8kHz mu-law
-   serializer.
-3. Marking appointments *completed* / *no-show* (the statuses exist but nothing sets them)
-4. Signing out automatically when the token expires
-5. An idle timeout for abandoned voice calls
+2. Marking appointments *completed* / *no-show* (the statuses exist but nothing sets them)
+3. Signing out automatically when the token expires
+4. An idle timeout for abandoned voice calls
+5. A duplicate greeting in the model's context — it is added once as the assistant's opening and
+   recorded again when spoken. Harmless but wasteful, and it affects both transports.
 
 ---
 

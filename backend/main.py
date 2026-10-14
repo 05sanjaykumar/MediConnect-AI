@@ -19,10 +19,12 @@ load_dotenv()
 # the API stays up, only the voice endpoints go missing.
 try:
     from routes.audio import router as audio_router
+    from routes.telephony import router as telephony_router
 
     VOICE_AVAILABLE = True
 except ImportError as exc:  # pragma: no cover - depends on local install
     audio_router = None
+    telephony_router = None
     VOICE_AVAILABLE = False
     VOICE_IMPORT_ERROR = str(exc)
 
@@ -32,6 +34,16 @@ async def lifespan(app: FastAPI):
     print("🚀 MediConnect AI backend starting...")
     print(f"   database: {describe()}")
     print(f"   voice:    {'pipecat loaded' if VOICE_AVAILABLE else 'disabled (pipecat not installed)'}")
+    if VOICE_AVAILABLE:
+        from routes.telephony import telephony_status
+
+        tel = telephony_status()
+        if tel["configured"]:
+            print(f"   phone:    {tel['twilio_number']} -> {tel['webhook_url']}")
+        else:
+            absent = [k for k in ("account_sid", "auth_token", "twilio_number",
+                                  "public_host") if not tel[k]]
+            print(f"   phone:    not configured (missing {', '.join(absent)})")
     # Schema is owned by Alembic. Run `alembic upgrade head` after pulling
     # changes; the app never alters tables on startup.
 
@@ -72,6 +84,7 @@ app.add_middleware(
 
 if VOICE_AVAILABLE:
     app.include_router(audio_router, prefix="/api")
+    app.include_router(telephony_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(doctors_router, prefix="/api")
 app.include_router(appointments_router, prefix="/api")

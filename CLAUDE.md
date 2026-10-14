@@ -83,7 +83,9 @@ backend/
   routes/doctors.py    search, slots, next-available, PATCH status
   routes/appointments.py book (409 carries ranked alternates), reschedule, cancel, mine
   routes/admin.py      overview, doctors CRUD, working hours, appointments?scope=, /admin/queue
-  routes/audio.py      voice WebSocket; identify_caller; greeting; ACTIVE_CALLS registry
+  routes/audio.py      voice WebSocket; identify_caller; build_pipeline; ACTIVE_CALLS registry
+  routes/telephony.py  Twilio: TwiML webhook, media-stream WS, outbound call, status
+  tools/fake_twilio_call.py  fakes a Twilio call locally — test the phone path for free
   services/availability.py  what each status blocks and for how long
   services/slot_engine.py   working hours → slots, generated lazily & batched
   services/booking.py       book/cancel/reschedule — the core; the concurrency guarantee
@@ -141,6 +143,20 @@ Kokoro were measured *slower* than fp32 CPU — don't retry them.
 **Browser serializer.** `BrowserFrameSerializer` drops `InterruptionFrame` — pipecat 1.8 sends it, the JS
 transport can't parse it ("Unknown frame kind").
 
+**The phone is just another transport.** `build_pipeline(transport, session, vad_analyzer=None)` is
+shared; Twilio differs only in the serializer (8 kHz mu-law) and in supplying a VAD analyzer. Three
+things telephony forced into the open:
+- **A phone sends no speech events.** The pipecat JS client runs VAD in the page; a telephone sends
+  only audio. Without a server-side analyzer the agent never decides the caller has finished.
+- The browser transport had been passing `vad_enabled` / `vad_analyzer` / `vad_audio_passthrough` to
+  `FastAPIWebsocketParams`, which **defines none of them** — pydantic ignored all three silently, so
+  that Silero analyzer never ran. Removed; the browser does its own detection.
+- **A real call presents E.164** (`+919840012346`); patients are stored as ten digits. `identify_caller`
+  falls back to matching the national number, or every phone caller is a stranger.
+
+Who the patient is depends on direction: **inbound they dialled us (`From`), outbound we dialled them
+(`To`** — `From` is our own Twilio number and identifies nobody).
+
 **Status never cancels appointments.** Going into surgery blocks *open* slots; already-confirmed
 appointments inside the window are returned as `appointments_needing_attention` for a human.
 
@@ -162,6 +178,16 @@ can be open side by side for the live-status demo.
   appointments and 33 orphaned `booked` slots (cleaned up 13 Sep 2026).
 - **Deleting an appointment must also reopen its slot**, otherwise the slot stays `booked` forever and is
   invisible to patients.
+- **Twilio trial plays a gate before your TwiML.** On an outbound trial call the recipient hears
+  "you have a trial account" and must **press a key**; if they don't, the call ends and your webhook is
+  never fetched. Observed: 13s billed, zero requests through ngrok. Upgrading (~$20) removes it.
+- **ngrok free URLs change on every restart.** `PUBLIC_HOST` in `.env` *and* the number's voice webhook
+  both have to be re-pointed. `tools/fake_twilio_call.py` needs neither — prefer it for testing.
+- **Twilio won't sell this account an Indian number** (`AvailablePhoneNumbers/IN/Local` → 404). India
+  needs a regulatory bundle. The number we own is **US +1 559 238 8581** ($1.15/mo), so anyone dialling
+  it from India pays international rates — which is why the browser demo stays the one for the panel.
+- **An account SID + auth token is full API access** — no read-only variant. It can buy numbers and
+  place calls. Ask before anything billable.
 - **Groq free tier: 8,000 tokens/min per model.** Each LLM call is ~900 tokens (prompt + 7 tool schemas);
   a booking turn uses 2–3 calls. When the agent "goes silent", check for a 429 in the log first.
 - **Groq retired the Llama chat models.** Model names are env-driven for this reason.
@@ -211,9 +237,17 @@ can be open side by side for the live-status demo.
 - Patient / doctor / admin dashboards, login, live availability via Supabase Realtime
 - Admin opens on a **Queue** (upcoming, grouped by day, doctor filter); Doctors tab shows "N waiting";
   History tab has past / cancelled / all
-- 40 backend tests
+- **Twilio phone layer** — a real call reaches the same agent (see Telephony below)
+- 55 backend tests
 
-**Last session ended with** (13 Oct 2026, all on `main`, pushed)
+**Last session ended with** (14 Oct 2026, branch `feat/twilio-phone-layer`, not pushed)
+- `routes/telephony.py`: TwiML webhook, media-stream WebSocket, outbound call endpoint, status endpoint
+- `tools/fake_twilio_call.py` — fakes a Twilio call locally; verifies the whole phone path without
+  dialling anything. Proven working end to end: STT heard "I need to see a cardiologist", the model
+  called `search_doctors`, 14.3s of 8 kHz speech came back
+- 15 telephony tests; the project report (`report/`, 87pp) was written the session before
+
+**Session before that** (13 Oct 2026, all on `main`, pushed)
 - `tests/conftest.py` leave-no-trace fixture — verified: DB counts identical before and after a full
   40-test run
 - Admin queue view (`scope` param, `/admin/queue`, joinedload in admin and booking lists)
@@ -223,13 +257,15 @@ can be open side by side for the live-status demo.
   It is the document for the panel; **this file** stays the one for the next AI session.
 
 **Not built — in priority order**
-1. **Mid-call interrupt** — the project's novelty claim. `ACTIVE_CALLS` (in `routes/audio.py`) is populated
-   and cleaned up but **nothing reads it**. Plan: `services/status.py`, after blocking slots, finds calls
+1. **Mid-call interrupt** — the project's novelty claim, and now the *only* headline item left.
+   `ACTIVE_CALLS` (in `routes/audio.py`) is populated and cleaned up by both the browser and the phone
+   path, but **nothing reads it**. Plan: `services/status.py`, after blocking slots, finds calls
    whose `VoiceSession.offered_slots` intersect the blocked slots, pushes a `TTSSpeakFrame` into that
    `PipelineTask` ("Dr. X just went into surgery…") and adds ranked alternates to the LLM context.
-2. **Twilio phone layer** — TwiML route + `TwilioFrameSerializer` (8kHz mu-law) reusing `build_pipeline`;
-   needs ngrok. User has a trial account (~$14 credit) and has verified their own number. Best demo:
-   Twilio calls the verified phone (outbound).
+2. **Duplicate greeting in the LLM context.** `get_llm_context` adds the greeting as the assistant's
+   first message, and the `TTSSpeakFrame` that speaks it is then recorded *again* by `context.assistant()`.
+   Visible in any call log as two identical assistant messages. Pre-existing, affects both transports,
+   costs tokens and tells the model it greeted twice. Fix in one place, not two.
 3. **Complete / no-show** — statuses exist in `models.py` but nothing ever sets them; past appointments
    stay `confirmed`. Add "Seen"/"No show" on the doctor dashboard. Ties to a cited paper (Kumar et al. 2025).
 4. **401 → sign out** in `lib/api.ts` (expired 12h token currently just shows error banners).

@@ -33,7 +33,7 @@ def get_llm_service():
     )
 
 
-def get_llm_context(session: VoiceSession | None = None):
+def get_llm_context(session: VoiceSession | None = None, vad_analyzer=None):
     """Build the conversation context with the booking tools attached.
 
     The session is what binds the tools to one caller — it holds who they are
@@ -44,6 +44,11 @@ def get_llm_context(session: VoiceSession | None = None):
     model. Smart Turn fired on "I want to see" before "neurologist" arrived and
     sent a half-sentence to the LLM. A fixed pause is duller but predictable,
     which is what a demo needs.
+
+    `vad_analyzer` is for callers whose client cannot tell us when they are
+    speaking. The browser runs its own voice activity detection and sends the
+    events; a telephone sends only audio, so the phone transport passes an
+    analyzer here and the aggregator derives the turn boundaries itself.
     """
     session = session or VoiceSession()
 
@@ -61,5 +66,6 @@ def get_llm_context(session: VoiceSession | None = None):
         user_turn_strategies=UserTurnStrategies(
             stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=USER_SPEECH_TIMEOUT)],
         ),
+        vad_analyzer=vad_analyzer,
     )
     return LLMContextAggregatorPair(context, user_params=user_params)
