@@ -11,8 +11,6 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket
 from loguru import logger
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -61,6 +59,16 @@ def health():
     return {"status": "ok", "active_calls": len(ACTIVE_CALLS)}
 
 
+def _national_number(phone: str) -> str | None:
+    """The last ten digits of a number, which is how patients are stored.
+
+    Returns None when there aren't ten digits to take, so a synthetic browser
+    id ("web-1a2b3c4d") can't accidentally match a patient.
+    """
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else None
+
+
 def identify_caller(phone: str | None) -> VoiceSession:
     """Work out who is calling, from their number.
 
@@ -80,6 +88,13 @@ def identify_caller(phone: str | None) -> VoiceSession:
     db = SessionLocal()
     try:
         user = db.scalar(select(User).where(User.phone == phone))
+        if user is None:
+            # A real call carries E.164 ("+918072348791"); patients are stored
+            # as the ten digits they'd actually give you ("9840012346"). Match
+            # on the national number so a phone caller is recognised at all.
+            national = _national_number(phone)
+            if national:
+                user = db.scalar(select(User).where(User.phone == national))
         if user is not None:
             session.patient_id = user.id
             session.patient_name = user.name
@@ -92,12 +107,17 @@ def identify_caller(phone: str | None) -> VoiceSession:
     return session
 
 
-def build_pipeline(transport, session: VoiceSession) -> PipelineTask:
-    """Assemble the pipeline. Shared by every transport."""
+def build_pipeline(transport, session: VoiceSession, vad_analyzer=None) -> PipelineTask:
+    """Assemble the pipeline. Shared by every transport.
+
+    `vad_analyzer` is supplied by transports whose client does not report
+    speech itself — a phone call, where only audio arrives. The browser client
+    runs its own detection, so it passes nothing.
+    """
     stt = get_stt_service()
     llm = get_llm_service()
     tts = get_tts_service()
-    context = get_llm_context(session)
+    context = get_llm_context(session, vad_analyzer=vad_analyzer)
 
     pipeline = Pipeline([
         transport.input(),
@@ -130,9 +150,12 @@ async def voice_websocket(
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            vad_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),
-            vad_audio_passthrough=False,
+            # No vad_analyzer here: the pipecat JS client runs voice activity
+            # detection in the page and sends the speech events with the audio.
+            # (These params used to carry vad_enabled/vad_analyzer, which this
+            # version of FastAPIWebsocketParams does not define and silently
+            # dropped.) The phone transport, which gets no such events, builds
+            # its own analyzer — see routes/telephony.py.
             serializer=BrowserFrameSerializer(),
         ),
     )
