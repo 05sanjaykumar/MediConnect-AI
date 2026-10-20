@@ -24,11 +24,17 @@ export default function Home() {
 
   const session = useOptionalSession();
 
-  // A real phone call arrives with caller ID. The browser has none, so if
-  // someone is signed in we pass their number — the agent then greets them by
-  // name and files the booking against their record, which is what makes a
-  // voice booking show up in their dashboard. Signed out, it stays an
-  // anonymous call and the agent asks who it's speaking to.
+  // A real phone call arrives with caller ID. The browser has none, so we pass
+  // the signed-in patient's number — the agent greets them by name and files
+  // the booking against their record, which is what makes a voice booking show
+  // up in their dashboard.
+  //
+  // Signing in is now required to start a call. Collecting a phone number by
+  // voice was the weak link: speech recognition mangles spoken digits, and the
+  // guard that refuses any number the caller didn't clearly say then rejects
+  // it — correctly, but the caller just hears the question again. A form takes
+  // a number once and gets it right, and the account it creates is the same
+  // one that works for the dashboard, cancelling and rescheduling.
   const WS_URL = useMemo(() => {
     const base =
       process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000/api/ws/voice";
@@ -167,11 +173,20 @@ export default function Home() {
             ? "\u00a0"
             : session?.phone
               ? `Calling as ${session.name} · ${session.phone}`
-              : "Calling as an unknown number — the agent will ask your name"}
+              : "Sign in first so the agent knows who it is booking for"}
         </p>
       </div>
 
       {/* Mic Button */}
+      {session === null ? (
+        <Link
+          href="/login"
+          className="rounded-full border border-teal-500/40 bg-teal-500/10 px-8 py-4 text-sm font-medium text-teal-300 transition hover:border-teal-400 hover:bg-teal-500/20"
+        >
+          Sign in or create an account to start
+        </Link>
+      ) : (
+      <>
       {/* Clickable even while connecting: a second tap cancels, so a stalled
           connection is always recoverable without reloading the page. */}
       <button
@@ -224,6 +239,8 @@ export default function Home() {
         {status === "speaking" && "Speaking"}
         {status === "error" && "Connection error"}
       </p>
+      </>
+      )}
 
       {/* Transcript Area */}
       <div className="mt-10 w-full max-w-md space-y-3">

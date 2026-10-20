@@ -19,6 +19,12 @@ const DEMO_PASSWORD = "demo1234";
 
 export default function LoginPage() {
   const router = useRouter();
+  // Creating an account is a form, not a conversation. Reading a phone number
+  // out to the voice agent was unreliable — speech recognition mangles spoken
+  // digits, and the guard that refuses a number the caller never clearly said
+  // then (correctly) rejects it. Typing it once is simply better.
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -47,6 +53,24 @@ export default function LoginPage() {
     }
   }
 
+  async function signUp() {
+    setBusy(true);
+    setError("");
+    try {
+      const login = await api.register(name.trim(), phone.trim(), password);
+      const profile = await api.me(login.access_token).catch(() => undefined);
+      saveSession(login, profile);
+      router.replace(homeFor(login.role));
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Something went wrong. Try again.",
+      );
+      setBusy(false);
+    }
+  }
+
+  const signingUp = mode === "signup";
+
   return (
     <div className="flex min-h-full items-center justify-center px-5 py-16">
       <div className="w-full max-w-sm">
@@ -60,7 +84,9 @@ export default function LoginPage() {
             </span>
           </div>
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            Sign in with the phone number on your record.
+            {signingUp
+              ? "Create an account, then book by voice or on the web."
+              : "Sign in with the phone number on your record."}
           </p>
         </div>
 
@@ -69,10 +95,29 @@ export default function LoginPage() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            void signIn(phone, password);
+            void (signingUp ? signUp() : signIn(phone, password));
           }}
           className="space-y-4 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900"
         >
+          {signingUp && (
+            <div>
+              <label
+                htmlFor="name"
+                className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300"
+              >
+                Full name
+              </label>
+              <input
+                id="name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                autoComplete="name"
+                placeholder="Arun Chauhan"
+                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+            </div>
+          )}
+
           <div>
             <label
               htmlFor="phone"
@@ -103,15 +148,35 @@ export default function LoginPage() {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete={signingUp ? "new-password" : "current-password"}
               placeholder="••••••••"
               className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
             />
           </div>
 
-          <Button type="submit" disabled={busy || !phone || !password} className="w-full">
-            {busy ? "Signing in…" : "Sign in"}
+          <Button
+            type="submit"
+            disabled={busy || !phone || !password || (signingUp && name.trim().length < 2)}
+            className="w-full"
+          >
+            {busy
+              ? signingUp ? "Creating…" : "Signing in…"
+              : signingUp ? "Create account" : "Sign in"}
           </Button>
+
+          <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
+            {signingUp ? "Already registered?" : "New patient?"}{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setMode(signingUp ? "signin" : "signup");
+                setError("");
+              }}
+              className="font-medium text-teal-700 underline-offset-2 hover:underline dark:text-teal-400"
+            >
+              {signingUp ? "Sign in" : "Create an account"}
+            </button>
+          </p>
         </form>
 
         <div className="mt-6">
