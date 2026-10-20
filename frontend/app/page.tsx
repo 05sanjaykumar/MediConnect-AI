@@ -92,14 +92,41 @@ export default function Home() {
   }, [initClient]);
 
 
+  // `connect()` can hang rather than reject — most often because the browser's
+  // microphone prompt is sitting unanswered, or another tab already holds the
+  // mic. Without a deadline the button stays disabled on "connecting" and only
+  // a page reload gets it back, which is exactly how it looked broken.
+  const CONNECT_TIMEOUT_MS = 20_000;
+
+  const describeFailure = (e: unknown): string => {
+    const name = (e as { name?: string })?.name;
+    if (name === "NotAllowedError")
+      return "Microphone access was blocked. Allow it in your browser, then try again.";
+    if (name === "NotFoundError")
+      return "No microphone found. Plug one in or use a device that has one.";
+    if ((e as Error)?.message === "CONNECT_TIMEOUT")
+      return "Couldn't start the call. Check that the microphone prompt isn't waiting for you, then try again.";
+    return String(e);
+  };
+
   const handleConnect = async () => {
+    setStatus("connecting");
+    setError("");
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("CONNECT_TIMEOUT")), CONNECT_TIMEOUT_MS);
+    });
+
     try {
-      setStatus("connecting");
-      setError("");
-      await clientRef.current?.connect({ wsUrl: WS_URL });
+      await Promise.race([clientRef.current!.connect({ wsUrl: WS_URL }), deadline]);
     } catch (e) {
-      setError(String(e));
+      // Leave no half-open session behind, or the next attempt inherits it.
+      await clientRef.current?.disconnect().catch(() => {});
+      setError(describeFailure(e));
       setStatus("error");
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -145,16 +172,17 @@ export default function Home() {
       </div>
 
       {/* Mic Button */}
+      {/* Clickable even while connecting: a second tap cancels, so a stalled
+          connection is always recoverable without reloading the page. */}
       <button
-        onClick={isActive ? handleDisconnect : handleConnect}
-        disabled={status === "connecting"}
+        onClick={isActive || status === "connecting" ? handleDisconnect : handleConnect}
         className={`
           relative w-24 h-24 rounded-full flex items-center justify-center
           transition-all duration-300 cursor-pointer
           ${status === "idle" || status === "error"
             ? "bg-zinc-800 hover:bg-zinc-700 border border-zinc-600"
             : status === "connecting"
-            ? "bg-zinc-800 border border-zinc-600 opacity-60 cursor-not-allowed"
+            ? "bg-zinc-800 border border-zinc-600 opacity-60"
             : status === "listening"
             ? "bg-red-600 hover:bg-red-500 shadow-[0_0_32px_rgba(220,38,38,0.4)]"
             : "bg-green-600 hover:bg-green-500 shadow-[0_0_32px_rgba(34,197,94,0.4)]"

@@ -23,7 +23,7 @@ from pipecat.transports.websocket.fastapi import (
 from sqlalchemy import select
 
 from agents.prompt import greeting_for
-from agents.tools import VoiceSession
+from agents.tools import WEB_CALLER_PREFIX, VoiceSession
 from database import SessionLocal
 from models import User
 from services.LLM import get_llm_context, get_llm_service
@@ -79,11 +79,16 @@ def identify_caller(phone: str | None) -> VoiceSession:
     simulate a known caller instead.
     """
     if not phone:
-        phone = f"web-{uuid.uuid4().hex[:8]}"
+        phone = f"{WEB_CALLER_PREFIX}{uuid.uuid4().hex[:8]}"
         logger.info(f"Browser call with no caller ID; using synthetic id {phone}")
         return VoiceSession(caller_phone=phone)
 
-    session = VoiceSession(caller_phone=phone)
+    # Store the national number, not the raw caller ID. A phone call arrives as
+    # E.164 ("+919840012346") but patients are keyed on the ten digits they
+    # would actually type at sign-in — and a record created during this call is
+    # written from `caller_phone`. Storing "+91…" made accounts that worked on
+    # the call and then failed at the login screen.
+    session = VoiceSession(caller_phone=_national_number(phone) or phone)
 
     db = SessionLocal()
     try:

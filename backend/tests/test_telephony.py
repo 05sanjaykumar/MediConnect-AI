@@ -193,3 +193,58 @@ def test_sip_caller_reaches_the_same_patient_record():
         "sip:9840012346@mediconnect-097e72.sip.twilio.com"))
     assert session.known_at_start is True
     assert session.patient_name == "Sanjay Kumar"
+
+
+# ------------------------------------------- browser callers can sign in later
+
+
+def test_browser_caller_is_not_mistaken_for_having_a_number():
+    """A synthetic `web-…` id is a session id, not a phone number. Treating it
+    as one is what filed browser callers under an account nobody can log into."""
+    from agents.tools import WEB_CALLER_PREFIX, VoiceSession
+
+    browser = VoiceSession(caller_phone=f"{WEB_CALLER_PREFIX}1a2b3c4d")
+    phone = VoiceSession(caller_phone="9000000111")
+    assert browser.has_real_number is False
+    assert phone.has_real_number is True
+
+
+def test_browser_caller_is_asked_for_a_number_as_well_as_a_name():
+    from agents.prompt import describe_caller, greeting_for
+    from agents.tools import WEB_CALLER_PREFIX, VoiceSession
+
+    session = VoiceSession(caller_phone=f"{WEB_CALLER_PREFIX}1a2b3c4d")
+    assert "phone number" in greeting_for(session)
+    assert "phone number" in describe_caller(session)
+
+
+def test_phone_caller_is_asked_only_for_a_name():
+    from agents.prompt import greeting_for
+    from agents.tools import VoiceSession
+
+    assert "phone number" not in greeting_for(VoiceSession(caller_phone="9000000111"))
+
+
+def test_identify_caller_stores_the_national_number_not_e164():
+    """The record created during a call is written from caller_phone, and the
+    login screen compares exactly — so it has to be the ten digits."""
+    session = identify_caller("+919840012346")
+    assert session.caller_phone == "9840012346"
+
+
+def test_a_voice_created_patient_can_actually_sign_in():
+    """The whole point: a stranger who books by voice must be able to reach the
+    dashboard to cancel. Previously every account got the same dead password."""
+    from security import verify_password
+    from agents.tools import _new_patient
+    from database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        user, code = _new_patient(db, "Test Caller", "9000000222")
+        assert code.isdigit() and len(code) == 6
+        assert verify_password(code, user.password_hash)
+        assert user.role == "patient"
+        assert user.phone == "9000000222"
+    finally:
+        db.close()
