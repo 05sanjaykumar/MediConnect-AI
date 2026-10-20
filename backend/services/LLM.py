@@ -25,6 +25,10 @@ def get_llm_service():
             temperature=0.3,
             top_p=0.9,
             max_completion_tokens=1024,
+            # A small penalty against saying the same thing twice. The repeated
+            # greeting above was the trigger for the twelvefold repeat, but a
+            # degenerate loop is cheap to guard against and expensive to hear.
+            frequency_penalty=0.3,
             # gpt-oss models reason before answering. On a phone call that
             # reasoning is dead air. "low" keeps it short; this is the setting
             # config.py declared but the service was never actually given.
@@ -58,10 +62,19 @@ def get_llm_context(session: VoiceSession | None = None, vad_analyzer=None):
         messages=[{"role": "system", "content": build_system_prompt(session)}],
         tools=build_tools(session),
     )
-    # The greeting is spoken by TTS the moment the call connects (routes/audio.py),
-    # with no model call. Record it here as the assistant's first line so the
-    # model knows it has already introduced itself and used the caller's name.
-    context.add_message({"role": "assistant", "content": greeting_for(session)})
+    # The greeting is spoken by TTS the moment the call connects, with no model
+    # call, and the assistant aggregator records it like any other spoken line —
+    # so it lands in the context on its own. It used to be added here as well,
+    # which put the identical sentence in twice:
+    #
+    #   {'role': 'assistant', 'content': 'Hello Sanjay, this is MediConnect…'},
+    #   {'role': 'assistant', 'content': 'Hello Sanjay, this is MediConnect…'}
+    #
+    # A model shown its own message repeated takes that as the house style. It
+    # then returned "Which day would you like to come in?" twelve times in one
+    # reply, which Kokoro choked on ("completed with no audio") and the caller
+    # heard as the agent asking over and over. Adding it once is the fix; the
+    # aggregator does that.
     user_params = LLMUserAggregatorParams(
         user_turn_strategies=UserTurnStrategies(
             stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=USER_SPEECH_TIMEOUT)],
