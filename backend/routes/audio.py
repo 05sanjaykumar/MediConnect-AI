@@ -11,6 +11,8 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket
 from loguru import logger
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -22,6 +24,7 @@ from pipecat.transports.websocket.fastapi import (
 )
 from sqlalchemy import select
 
+from config import USER_SPEECH_TIMEOUT
 from agents.prompt import greeting_for
 from agents.tools import WEB_CALLER_PREFIX, VoiceSession
 from database import SessionLocal
@@ -155,17 +158,24 @@ async def voice_websocket(
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            # No vad_analyzer here: the pipecat JS client runs voice activity
-            # detection in the page and sends the speech events with the audio.
-            # (These params used to carry vad_enabled/vad_analyzer, which this
-            # version of FastAPIWebsocketParams does not define and silently
-            # dropped.) The phone transport, which gets no such events, builds
-            # its own analyzer — see routes/telephony.py.
+            # The analyzer is not passed here — this version of
+            # FastAPIWebsocketParams defines no vad_* field and pydantic drops
+            # anything extra in silence, which is how the original one came to
+            # look configured while never running. It goes to the aggregator
+            # instead, below.
             serializer=BrowserFrameSerializer(),
         ),
     )
 
-    task = build_pipeline(transport, session)
+    # Without a server-side analyzer the turn boundary comes from transcription
+    # arriving, so every fragment the recogniser emits becomes a whole user
+    # turn: "Okay" / "is" / "appointment available tomorrow" went to the model
+    # as three separate questions, and the agent answered each one by asking
+    # which department again. The phone path had this from the start; the
+    # browser path was left relying on client events that don't drive turns.
+    vad = SileroVADAnalyzer(params=VADParams(stop_secs=USER_SPEECH_TIMEOUT))
+
+    task = build_pipeline(transport, session, vad_analyzer=vad)
 
     # Speak first. The greeting goes straight to TTS — no model call — so the
     # caller hears a voice within a second of connecting, by name if we know
