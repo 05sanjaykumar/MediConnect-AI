@@ -2,10 +2,6 @@
 
 **A Voice-AI Driven Doctor Appointment and Live Availability Scheduling Platform**
 
-BCSE497J Project I · Fall 2026–2027 · School of Computer Science and Engineering, VIT Chennai
-
-Ananya Kumari (23BCE1474) · Sanjay Kumar (23BCE1248) · Riya Senju (23BCE1290)
-
 ---
 
 A patient books an appointment **by talking** — the agent finds a doctor, reads out real free
@@ -13,7 +9,7 @@ times and books one — while doctors change a live status from their own dashbo
 go through the same REST API and the same booking code, so a doctor going into surgery removes
 those times from the voice caller and the web user at the same moment.
 
-The voice layer extends our earlier Pipecat implementation
+The voice layer extends my earlier Pipecat implementation
 ([Gensail Voice AI](https://github.com/05sanjaykumar/Gensail-Voice-AI)), adding tool calling so the
 agent can search and book rather than only converse.
 
@@ -25,7 +21,8 @@ agent can search and book rather than only converse.
 - [How it works](#how-it-works) — [data model](#data-model), [slot engine](#the-slot-engine),
   [booking](#booking-and-the-concurrency-guarantee), [status](#doctor-status--availability),
   [fallback](#the-fallback-ranking), [voice](#the-voice-agent), [phone](#the-phone-channel), [live updates](#live-availability)
-- [Setup](#setup) · [Running](#running) · [Demo accounts](#demo-accounts) · [API](#api)
+- [Setup](#setup) · [Running](#running) · [One command, with a public link](#one-command-with-a-public-link)
+- [Demo accounts](#demo-accounts) · [API](#api)
 - [Testing](#testing) · [Engineering notes](#engineering-notes) · [Status](#status)
 
 ---
@@ -254,7 +251,7 @@ Three things telephony forces that the browser hides:
   actually give you. `identify_caller` falls back to matching the national number, or every phone
   caller is a stranger.
 - **Who the patient is depends on direction.** Inbound, they dialled us, so they are `From`. Outbound,
-  we dialled them, so they are `To` — `From` is our own number and identifies nobody.
+  we dialled them, so they are `To` — `From` is the Twilio number and identifies nobody.
 
 Testing it needn't cost anything. `tools/fake_twilio_call.py` speaks Twilio's media-stream protocol
 directly, so the whole inbound path can be exercised locally — no number, no tunnel, no call charges:
@@ -276,7 +273,7 @@ notice and must press a key before your TwiML runs at all.
 ### Live availability
 
 The browser subscribes **directly to Supabase Realtime** on `doctor_status`. There is no WebSocket hub
-in our backend for this; a doctor's status change goes database → Supabase → every open dashboard.
+in the backend for this; a doctor's status change goes database → Supabase → every open dashboard.
 
 Row-level security is enabled on all seven tables, with anonymous `SELECT` policies on **only**
 `doctors` and `doctor_status` — public information. `users` and `appointments` are sealed, so the
@@ -361,6 +358,85 @@ cd frontend && npm run dev
 Startup prints which database it reached, whether Pipecat loaded and that the connection pool is warm.
 Stop both with `pkill -f "uvicorn main:app"; pkill -f "next dev"`.
 
+If port 3000 is already taken, run the frontend elsewhere — `npm run dev -- -p 3001` — and read the
+URLs above as `:3001`. `demo.sh` below uses 3001 for exactly this reason.
+
+---
+
+## One command, with a public link
+
+Four processes, three config files and a Twilio setting have to agree before a voice call works from
+outside the machine. `demo.sh` does all of it and prints a link anyone can open:
+
+```bash
+./demo.sh up
+```
+
+```
+→ ngrok
+   api=https://ab12cd34.ngrok-free.app
+   web=https://ef56gh78.ngrok-free.app
+→ pointing the config at today's URLs
+→ backend
+→ frontend
+→ re-pointing the Twilio SIP domain
+
+checks:
+   backend  :8000      200
+   frontend :3001      200
+   public page         200
+   api via proxy       200
+   active calls        0
+
+SHARE THIS:  https://ef56gh78.ngrok-free.app
+local:       http://localhost:3001   (voice)   /login  (dashboards)
+phone:       +1 559 238 8581    SIP: mediconnect-097e72.sip.twilio.com
+```
+
+Open the `SHARE THIS` URL on a phone, hand it to someone across the country, or use it yourself —
+it serves the voice screen and proxies the API through the same origin, so the microphone works
+without a second tunnel or a CORS exception.
+
+| | |
+|---|---|
+| `./demo.sh up` | starts everything and prints the link |
+| `./demo.sh link` | prints the current link again |
+| `./demo.sh down` | stops backend, frontend, ngrok and the keep-awake |
+
+**What `up` actually does**, because skipping any of it is what breaks a live demo:
+
+1. Kills anything already running on those ports
+2. Holds the Mac awake with `caffeinate` (the lid still has to stay open)
+3. Starts both ngrok tunnels and waits for them to report their URLs
+4. Rewrites `PUBLIC_HOST` and `FRONTEND_URL` in `backend/.env`, and
+   `NEXT_PUBLIC_BACKEND_WS_URL` in `frontend/.env.local` — **a free ngrok URL changes on every
+   restart**, so these are rewritten every time
+5. Starts uvicorn (log: `/tmp/mc.log`) and Next.js on 3001 (log: `/tmp/mc-front.log`)
+6. Re-points the Twilio SIP domain at today's host via `backend/tools/setup_sip.py`
+7. Checks all four endpoints and prints the result
+
+**Prerequisites** — [ngrok](https://ngrok.com/download) installed and authenticated
+(`ngrok config add-authtoken <token>`), with both tunnels named in `~/Library/Application
+Support/ngrok/ngrok.yml`:
+
+```yaml
+version: "3"
+tunnels:
+  api:
+    addr: 8000
+    proto: http
+  web:
+    addr: 3001
+    proto: http
+```
+
+The tunnel **names** matter: the script looks up `api` and `web` by name through ngrok's local API on
+port 4040. The phone and SIP lines only apply if Twilio credentials are in `backend/.env`; without
+them everything else still comes up and the link still works.
+
+The link lives only as long as the terminal does. Close the laptop or stop the script and it dies —
+run `./demo.sh up` again and share the new URL.
+
 ---
 
 ## Demo accounts
@@ -437,7 +513,7 @@ Roles are enforced server-side: a patient token on an admin route gets `403`, no
 ## Testing
 
 ```bash
-cd backend && .venv/bin/python -m pytest tests -q        # 55 tests, 9–10 min
+cd backend && .venv/bin/python -m pytest tests -q        # 67 tests, 9–10 min
 ```
 
 Takes minutes because every query is a real round trip to a hosted database.
@@ -446,7 +522,7 @@ Takes minutes because every query is a real round trip to a hosted database.
 |---|---|
 | `tests/test_booking.py` (9) | Slot generation is idempotent, past slots are never offered, status blocking windows, book/cancel, **the 30-way concurrency test** |
 | `tests/test_agent_tools.py` (31) | Every voice tool, the id whitelist, invented names and phone numbers, caller identity, cancelling someone else's appointment, TTS chunking |
-| `tests/test_telephony.py` (15) | TwiML for inbound and outbound, the caller the number resolves to, E.164 → patient matching, Twilio's connected/start handshake, configuration reporting |
+| `tests/test_telephony.py` (27) | TwiML for inbound and outbound, the caller the number resolves to, E.164 → patient matching, Twilio's connected/start handshake, configuration reporting |
 
 The suite runs against the **real** database, so `tests/conftest.py` snapshots the highest ids and the
 booked slots before each test and removes anything created afterwards. Row counts are identical before
@@ -490,7 +566,7 @@ Auth and roles · doctor search with live status · slot generation · book / ca
 ranked alternates · the concurrency guarantee · admin management · status changes blocking and
 releasing slots · voice agent booking by browser microphone with caller identity and guard rails ·
 patient, doctor and admin dashboards · live availability via Supabase Realtime ·
-**booking by telephone through Twilio** · 55 tests
+**booking by telephone through Twilio** · 67 tests
 
 **Not built yet**
 
@@ -500,8 +576,6 @@ patient, doctor and admin dashboards · live availability via Supabase Realtime 
 2. Marking appointments *completed* / *no-show* (the statuses exist but nothing sets them)
 3. Signing out automatically when the token expires
 4. An idle timeout for abandoned voice calls
-5. A duplicate greeting in the model's context — it is added once as the assistant's opening and
-   recorded again when spoken. Harmless but wasteful, and it affects both transports.
 
 ---
 
