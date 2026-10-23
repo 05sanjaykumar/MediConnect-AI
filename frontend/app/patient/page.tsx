@@ -160,6 +160,11 @@ export default function PatientPage() {
     );
   }
 
+  // When set, picking a slot moves that appointment instead of making a new
+  // one. The backend does this in a single transaction, so a failure leaves
+  // the original appointment untouched rather than destroying it.
+  const [movingId, setMovingId] = useState<number | null>(null);
+
   async function book(slotId: number) {
     if (!session) return;
     setBooking(true);
@@ -167,6 +172,16 @@ export default function PatientPage() {
     setOk("");
     setAlternates([]);
     try {
+      if (movingId !== null) {
+        const moved = await api.reschedule(movingId, slotId, session.token);
+        setOk(`Moved to ${formatDateTime(moved.start_at)} with ${moved.doctor_name}.`);
+        setMovingId(null);
+        await Promise.all([
+          loadAppointments(session.token),
+          selected ? loadSlots(selected.id, day) : Promise.resolve(),
+        ]);
+        return;
+      }
       const appointment = await api.book(slotId, session.token, reason || undefined);
       setOk(
         `Booked with ${appointment.doctor_name}, ${formatDateTime(appointment.start_at)}.`,
@@ -420,6 +435,25 @@ export default function PatientPage() {
                       <span className="rounded bg-teal-50 px-1.5 py-0.5 text-[11px] font-medium text-teal-700 dark:bg-teal-500/10 dark:text-teal-400">
                         by voice
                       </span>
+                    )}
+                    {movingId === appointment.id ? (
+                      <Button onClick={() => setMovingId(null)}>
+                        Cancel move
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={() => {
+                          // Open that doctor's times; the next slot picked
+                          // moves this appointment rather than adding one.
+                          setMovingId(appointment.id);
+                          setOk("Pick a new time for this appointment.");
+                          setProblem("");
+                          const doctor = doctors?.find((d) => d.id === appointment.doctor_id);
+                          if (doctor) setSelected(doctor);
+                        }}
+                      >
+                        Reschedule
+                      </Button>
                     )}
                     <Button
                       variant="danger"

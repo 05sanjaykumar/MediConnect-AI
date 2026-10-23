@@ -24,11 +24,17 @@ export default function Home() {
 
   const session = useOptionalSession();
 
-  // A real phone call arrives with caller ID. The browser has none, so if
-  // someone is signed in we pass their number — the agent then greets them by
-  // name and files the booking against their record, which is what makes a
-  // voice booking show up in their dashboard. Signed out, it stays an
-  // anonymous call and the agent asks who it's speaking to.
+  // A real phone call arrives with caller ID. The browser has none, so we pass
+  // the signed-in patient's number — the agent greets them by name and files
+  // the booking against their record, which is what makes a voice booking show
+  // up in their dashboard.
+  //
+  // Signing in is now required to start a call. Collecting a phone number by
+  // voice was the weak link: speech recognition mangles spoken digits, and the
+  // guard that refuses any number the caller didn't clearly say then rejects
+  // it — correctly, but the caller just hears the question again. A form takes
+  // a number once and gets it right, and the account it creates is the same
+  // one that works for the dashboard, cancelling and rescheduling.
   const WS_URL = useMemo(() => {
     const base =
       process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000/api/ws/voice";
@@ -92,14 +98,41 @@ export default function Home() {
   }, [initClient]);
 
 
+  // `connect()` can hang rather than reject — most often because the browser's
+  // microphone prompt is sitting unanswered, or another tab already holds the
+  // mic. Without a deadline the button stays disabled on "connecting" and only
+  // a page reload gets it back, which is exactly how it looked broken.
+  const CONNECT_TIMEOUT_MS = 20_000;
+
+  const describeFailure = (e: unknown): string => {
+    const name = (e as { name?: string })?.name;
+    if (name === "NotAllowedError")
+      return "Microphone access was blocked. Allow it in your browser, then try again.";
+    if (name === "NotFoundError")
+      return "No microphone found. Plug one in or use a device that has one.";
+    if ((e as Error)?.message === "CONNECT_TIMEOUT")
+      return "Couldn't start the call. Check that the microphone prompt isn't waiting for you, then try again.";
+    return String(e);
+  };
+
   const handleConnect = async () => {
+    setStatus("connecting");
+    setError("");
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("CONNECT_TIMEOUT")), CONNECT_TIMEOUT_MS);
+    });
+
     try {
-      setStatus("connecting");
-      setError("");
-      await clientRef.current?.connect({ wsUrl: WS_URL });
+      await Promise.race([clientRef.current!.connect({ wsUrl: WS_URL }), deadline]);
     } catch (e) {
-      setError(String(e));
+      // Leave no half-open session behind, or the next attempt inherits it.
+      await clientRef.current?.disconnect().catch(() => {});
+      setError(describeFailure(e));
       setStatus("error");
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -140,21 +173,31 @@ export default function Home() {
             ? "\u00a0"
             : session?.phone
               ? `Calling as ${session.name} · ${session.phone}`
-              : "Calling as an unknown number — the agent will ask your name"}
+              : "Sign in first so the agent knows who it is booking for"}
         </p>
       </div>
 
       {/* Mic Button */}
+      {session === null ? (
+        <Link
+          href="/login"
+          className="rounded-full border border-teal-500/40 bg-teal-500/10 px-8 py-4 text-sm font-medium text-teal-300 transition hover:border-teal-400 hover:bg-teal-500/20"
+        >
+          Sign in or create an account to start
+        </Link>
+      ) : (
+      <>
+      {/* Clickable even while connecting: a second tap cancels, so a stalled
+          connection is always recoverable without reloading the page. */}
       <button
-        onClick={isActive ? handleDisconnect : handleConnect}
-        disabled={status === "connecting"}
+        onClick={isActive || status === "connecting" ? handleDisconnect : handleConnect}
         className={`
           relative w-24 h-24 rounded-full flex items-center justify-center
           transition-all duration-300 cursor-pointer
           ${status === "idle" || status === "error"
             ? "bg-zinc-800 hover:bg-zinc-700 border border-zinc-600"
             : status === "connecting"
-            ? "bg-zinc-800 border border-zinc-600 opacity-60 cursor-not-allowed"
+            ? "bg-zinc-800 border border-zinc-600 opacity-60"
             : status === "listening"
             ? "bg-red-600 hover:bg-red-500 shadow-[0_0_32px_rgba(220,38,38,0.4)]"
             : "bg-green-600 hover:bg-green-500 shadow-[0_0_32px_rgba(34,197,94,0.4)]"
@@ -196,6 +239,8 @@ export default function Home() {
         {status === "speaking" && "Speaking"}
         {status === "error" && "Connection error"}
       </p>
+      </>
+      )}
 
       {/* Transcript Area */}
       <div className="mt-10 w-full max-w-md space-y-3">

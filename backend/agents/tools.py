@@ -22,6 +22,7 @@ model doesn't have to call again.
 """
 
 import asyncio
+import secrets
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -39,6 +40,12 @@ from services.fallback import rank_alternates
 from services.slot_engine import available_slots, generate_for_doctors, next_available
 
 PREFETCH_DAYS = 4  # after a search, warm this many days of slots in the background
+
+
+# A browser call has no caller ID, so routes/audio.py invents one with this
+# prefix. It identifies the *session*, never the person, and must never be
+# written to a patient record as their phone number.
+WEB_CALLER_PREFIX = "web-"
 
 
 @dataclass
@@ -60,6 +67,18 @@ class VoiceSession:
     booking_for: str | None = None
     offered_slots: set[int] = field(default_factory=set)
     offered_doctors: set[int] = field(default_factory=set)
+
+    @property
+    def has_real_number(self) -> bool:
+        """Is `caller_phone` a number we could actually ring, or a stand-in?
+
+        A browser call carries no caller ID, so `identify_caller` assigns a
+        synthetic `web-xxxxxxxx`. That is a non-empty string, which used to
+        read as "we have their number" — so the agent asked only for a name and
+        filed the patient under an id nobody can sign in with. Anything without
+        ten digits is not a number.
+        """
+        return bool(self.caller_phone) and not self.caller_phone.startswith(WEB_CALLER_PREFIX)
 
     def remember_doctors(self, doctor_ids) -> None:
         self.offered_doctors.update(doctor_ids)
@@ -109,17 +128,7 @@ def _resolve_patient(db, session: VoiceSession) -> int:
                     "I don't have this caller's name yet. Ask for it, then call "
                     "set_caller_details.",
                 )
-            from security import hash_password
-
-            user = User(
-                name=session.patient_name,
-                phone=session.caller_phone,
-                password_hash=hash_password("changeme"),
-                role="patient",
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
+            user, _code = _new_patient(db, session.patient_name, session.caller_phone)
         session.patient_id = user.id
         session.patient_name = user.name
         return user.id
@@ -129,6 +138,29 @@ def _resolve_patient(db, session: VoiceSession) -> int:
         "I don't know who is calling. Ask for their name and phone number, then "
         "call set_caller_details.",
     )
+
+
+def _new_patient(db, name: str, phone: str):
+    """Create a patient and the code they will use to sign in.
+
+    A caller who books by voice has no password, so the dashboard — where the
+    appointment can be viewed, rescheduled or cancelled — was unreachable to
+    them. Every voice-created account now gets a short numeric code, which the
+    agent reads back digit by digit before the call ends.
+    """
+    from security import hash_password
+
+    code = f"{secrets.randbelow(10**6):06d}"
+    user = User(
+        name=name,
+        phone=phone,
+        password_hash=hash_password(code),
+        role="patient",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user, code
 
 
 # Names a model produces when it hasn't actually asked. Refusing these is what
@@ -512,17 +544,7 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
             try:
                 user = db.scalar(select(User).where(User.phone == session.caller_phone))
                 if user is None:
-                    from security import hash_password
-
-                    user = User(
-                        name=name,
-                        phone=session.caller_phone,
-                        password_hash=hash_password("changeme"),
-                        role="patient",
-                    )
-                    db.add(user)
-                    db.commit()
-                    db.refresh(user)
+                    user, signin_code = _new_patient(db, name, session.caller_phone)
                     created = True
                 else:
                     created = False
@@ -547,6 +569,16 @@ def build_tools(session: VoiceSession) -> list[FunctionSchema]:
                 # browser session has a synthetic id, not a number — nothing to say.
                 if session.caller_phone.isdigit():
                     result["phone_spoken"] = _spoken_digits(session.caller_phone)
+                if created:
+                    # The caller has no way into the dashboard otherwise, and
+                    # the dashboard is where they cancel or reschedule.
+                    result["signin_code"] = signin_code
+                    result["signin_code_spoken"] = _spoken_digits(signin_code)
+                    result["tell_caller"] = (
+                        "After booking, tell them they can see or cancel the "
+                        "appointment online by signing in with their phone "
+                        "number, and read out signin_code_spoken once."
+                    )
                 return result
             finally:
                 db.close()

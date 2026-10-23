@@ -43,11 +43,19 @@ def patient(db):
 
 @pytest.fixture
 def free_slot(db, doctor):
-    """A slot far enough ahead that other tests won't have taken it."""
+    """A slot far enough ahead that other tests won't have taken it.
+
+    Doctors work Monday to Saturday, so a fixed offset is a trap: `today + 5`
+    lands on a Sunday every Tuesday, the day has no working hours, and three
+    tests error with "no free slots" through no fault of the code. Step over
+    Sunday instead.
+    """
     day = date.today() + timedelta(days=5)
+    while day.weekday() == 6:          # 6 = Sunday, nobody consults
+        day += timedelta(days=1)
     generate_for_day(db, doctor, day)
     slots = available_slots(db, doctor, day)
-    assert slots, "no free slots to test with — is the doctor's schedule seeded?"
+    assert slots, f"no free slots on {day:%A %d %b} — is the doctor's schedule seeded?"
     return slots[-1]
 
 

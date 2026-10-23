@@ -8,7 +8,13 @@
 // same ranked suggestions the voice agent reads out. ApiError carries them
 // through so the patient dashboard can offer the same recovery a caller gets.
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// `??` rather than `||` on purpose: an empty NEXT_PUBLIC_API_URL means "same
+// origin", which is how the app is served now — next.config.ts rewrites
+// /api/* to the backend, so the browser never talks cross-origin and never
+// meets a CORS preflight or ngrok's interstitial. With `||` the empty string
+// was falsy and silently fell back to localhost:8000, which is exactly the
+// request that failed from a tunnelled page.
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export type Role = "patient" | "doctor" | "admin";
 
@@ -219,6 +225,14 @@ export const api = {
     request<LoginResult>("/auth/login", {
       method: "POST",
       body: { phone, password },
+    }),
+
+  // Returns a token like login does, so a new patient is signed in straight
+  // away rather than being bounced back to the sign-in form.
+  register: (name: string, phone: string, password: string) =>
+    request<LoginResult>("/auth/register", {
+      method: "POST",
+      body: { name, phone, password },
     }),
 
   me: (token: string) => request<Profile>("/auth/me", { token }),

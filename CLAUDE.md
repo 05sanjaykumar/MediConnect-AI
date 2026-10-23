@@ -238,14 +238,70 @@ can be open side by side for the live-status demo.
 - Admin opens on a **Queue** (upcoming, grouped by day, doctor filter); Doctors tab shows "N waiting";
   History tab has past / cancelled / all
 - **Twilio phone layer** — a real call reaches the same agent (see Telephony below)
-- 55 backend tests
+- 64 backend tests
 
-**Last session ended with** (14 Oct 2026, branch `feat/twilio-phone-layer`, not pushed)
-- `routes/telephony.py`: TwiML webhook, media-stream WebSocket, outbound call endpoint, status endpoint
-- `tools/fake_twilio_call.py` — fakes a Twilio call locally; verifies the whole phone path without
-  dialling anything. Proven working end to end: STT heard "I need to see a cardiologist", the model
-  called `search_doctors`, 14.3s of 8 kHz speech came back
-- 15 telephony tests; the project report (`report/`, 87pp) was written the session before
+**Last session ended with** (20 Oct 2026, branch `feat/patient-self-service`, NOT pushed)
+Six commits. The final review is 21 Oct 2026 — read "Demo day" below first.
+- **Sign-in is now required before a voice call.** Collecting a phone number by
+  voice was unreliable (STT mangles spoken digits; the "number must be in the
+  transcript" guard then refuses it). A sign-up form on `/login` creates the
+  account — `POST /auth/register` already existed and nothing called it.
+- Voice-created patients get a six-digit code the agent reads out, and are
+  stored on the ten-digit national number, so they can actually sign in. Before
+  this, every such account shared the password "changeme" and phone callers
+  were filed under `+91…` while the login screen compares exactly.
+- `describe_caller` treated the synthetic `web-xxxxxxxx` id as a real number,
+  so browser callers were filed under their session id — `id=56 'Sanji'
+  phone='web-1d0f867c'` holds a real appointment on an account nobody can ever
+  sign into. `VoiceSession.has_real_number` decides now.
+- Reschedule button on the patient dashboard (the API always had it).
+- Three bugs found only by testing through the tunnel, not on localhost:
+  `allowedDevOrigins` (the page never hydrated, so the mic button had no click
+  handler and looked dead); `/api/*` now proxied through the Next origin (a
+  second ngrok host meant a failed CORS preflight *and* ngrok's interstitial
+  returning HTML to `fetch`); and `lib/api.ts` using `||` so an empty API URL
+  fell back to `localhost:8000` — from a visitor's phone, their own machine.
+- The browser path had **no server-side VAD**, so turn boundaries came from
+  transcription arriving: "Okay" / "is" / "appointment available tomorrow"
+  became three turns and the agent re-asked each time. It builds a
+  `SileroVADAnalyzer` now, as the phone path always did.
+- The duplicate greeting was **not** harmless. Shown its own identical line
+  twice, the model replied "Which day would you like to come in?" twelve times
+  in one breath, which Kokoro failed on ("completed with no audio"). Fixed, plus
+  `frequency_penalty=0.3`.
+- 64 tests pass. `tests/test_booking.py` used `today+5` for its free slot, which
+  lands on a Sunday every Tuesday — doctors work Mon-Sat, so three tests errored
+  one day a week. Fixed.
+
+**Known bug, NOT fixed — the only open one**
+`services/booking.py` can report success to two callers for one slot. The
+database guarantee holds (the partial index is valid and enforcing; exactly one
+row exists), but `book()` returned an appointment to both:
+
+    outcomes: {SLOT_TAKEN: 28, booked: 2}
+    rows in db for that slot: [(212, 2233, 'confirmed')]
+
+So appointment 211 was reported booked and does not exist — the agent would
+tell that patient "Your appointment is booked" with nothing saved. Worse than an
+error. Pre-existing. Likely pgbouncer transaction-mode masking a rolled-back
+commit; the fix is a read-back after commit before returning success. This is
+why `test_concurrent_bookings_produce_exactly_one_appointment` fails in a full
+suite run and passes alone.
+
+**Demo day (21 Oct 2026)**
+- `.env` files were reset to localhost. Telephony is OFF (`PUBLIC_HOST` empty)
+  because a free ngrok URL dies with the session. To demo the phone or the
+  shareable link again: `ngrok start --all`, put the api host in `PUBLIC_HOST`,
+  the web URL in `FRONTEND_URL`, the wss api URL in
+  `NEXT_PUBLIC_BACKEND_WS_URL`, then `python tools/setup_sip.py`.
+- Port 3000 is the user's *other* project (skyler-ai). Run the frontend on 3001.
+- Safest demo is local browser voice + the two-tab live-status trick. The phone
+  and shareable-link paths both depend on a fresh tunnel.
+- Test patients left in the DB from this session: `Arun Chauhan` (9000000111),
+  `Meera Krishnan` (9000000333), `Kavya Raman` (9000000444), plus
+  `Test Caller` (9000000222). The user has not approved deleting them.
+- `report/` is untracked: three different report versions live there. The
+  63-page `mediconnect_final_Report_SanjayKumar.pdf` is the approved one.
 
 **Session before that** (13 Oct 2026, all on `main`, pushed)
 - `tests/conftest.py` leave-no-trace fixture — verified: DB counts identical before and after a full

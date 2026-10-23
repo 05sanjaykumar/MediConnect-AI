@@ -17,3 +17,6 @@ backend/.venv
 node_modules/
 .next/
 .env
+
+# macOS
+.DS_Store

@@ -11,6 +11,8 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket
 from loguru import logger
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -22,8 +24,9 @@ from pipecat.transports.websocket.fastapi import (
 )
 from sqlalchemy import select
 
+from config import USER_SPEECH_TIMEOUT
 from agents.prompt import greeting_for
-from agents.tools import VoiceSession
+from agents.tools import WEB_CALLER_PREFIX, VoiceSession
 from database import SessionLocal
 from models import User
 from services.LLM import get_llm_context, get_llm_service
@@ -79,11 +82,16 @@ def identify_caller(phone: str | None) -> VoiceSession:
     simulate a known caller instead.
     """
     if not phone:
-        phone = f"web-{uuid.uuid4().hex[:8]}"
+        phone = f"{WEB_CALLER_PREFIX}{uuid.uuid4().hex[:8]}"
         logger.info(f"Browser call with no caller ID; using synthetic id {phone}")
         return VoiceSession(caller_phone=phone)
 
-    session = VoiceSession(caller_phone=phone)
+    # Store the national number, not the raw caller ID. A phone call arrives as
+    # E.164 ("+919840012346") but patients are keyed on the ten digits they
+    # would actually type at sign-in — and a record created during this call is
+    # written from `caller_phone`. Storing "+91…" made accounts that worked on
+    # the call and then failed at the login screen.
+    session = VoiceSession(caller_phone=_national_number(phone) or phone)
 
     db = SessionLocal()
     try:
@@ -150,17 +158,24 @@ async def voice_websocket(
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            # No vad_analyzer here: the pipecat JS client runs voice activity
-            # detection in the page and sends the speech events with the audio.
-            # (These params used to carry vad_enabled/vad_analyzer, which this
-            # version of FastAPIWebsocketParams does not define and silently
-            # dropped.) The phone transport, which gets no such events, builds
-            # its own analyzer — see routes/telephony.py.
+            # The analyzer is not passed here — this version of
+            # FastAPIWebsocketParams defines no vad_* field and pydantic drops
+            # anything extra in silence, which is how the original one came to
+            # look configured while never running. It goes to the aggregator
+            # instead, below.
             serializer=BrowserFrameSerializer(),
         ),
     )
 
-    task = build_pipeline(transport, session)
+    # Without a server-side analyzer the turn boundary comes from transcription
+    # arriving, so every fragment the recogniser emits becomes a whole user
+    # turn: "Okay" / "is" / "appointment available tomorrow" went to the model
+    # as three separate questions, and the agent answered each one by asking
+    # which department again. The phone path had this from the start; the
+    # browser path was left relying on client events that don't drive turns.
+    vad = SileroVADAnalyzer(params=VADParams(stop_secs=USER_SPEECH_TIMEOUT))
+
+    task = build_pipeline(transport, session, vad_analyzer=vad)
 
     # Speak first. The greeting goes straight to TTS — no model call — so the
     # caller hears a voice within a second of connecting, by name if we know

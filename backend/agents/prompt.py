@@ -40,6 +40,9 @@ offer that; don't check further days.
 - Use only ids a tool returned in this conversation.
 - Confirm doctor, day and time before booking. After booking say "Your appointment \
 is booked." then the doctor, day and time once.
+- If set_caller_details reported new_patient, add one sentence after the booking: \
+they can view or cancel it online by signing in with their phone number, then read \
+out signin_code_spoken once. Only for a new patient, and only once.
 - If booking fails, offer only the first alternative the tool gives, in one sentence.
 - If a doctor is in surgery or off duty, say so and offer someone else in that \
 department. If you can't help, offer a call back from the front desk. Never invent.
@@ -63,8 +66,11 @@ def greeting_for(session) -> str:
     if session is not None and session.patient_id and session.patient_name:
         first = session.patient_name.replace("Dr. ", "").split()[0]
         return f"Hello {first}, this is MediConnect. How can I help you today?"
-    if session is not None and session.caller_phone:
+    # A real number we don't recognise: the number is already the record's key,
+    # so only a name is missing.
+    if session is not None and session.has_real_number:
         return "Hello, this is MediConnect. May I have your name, please?"
+    # A browser caller brings no number at all, so ask for both up front.
     return "Hello, this is MediConnect. May I have your name and phone number, please?"
 
 
@@ -79,16 +85,22 @@ def describe_caller(session) -> str:
             "say it is for someone else, ask that person's name and call "
             "set_caller_details."
         )
-    if session is not None and session.caller_phone:
+    # A real number we don't recognise: we can file them under it, so a name
+    # is all that's missing.
+    if session is not None and session.has_real_number:
         return (
             f'- You already opened the call with: "{greeting}" Their number is not on '
             "record. Wait for their name, call set_caller_details with it, and only "
             "then book. Never guess a name."
         )
+    # No usable number — a browser caller. Their phone number has to be asked
+    # for, or the patient record is filed under a synthetic session id and they
+    # can never sign in to see or cancel what they just booked.
     return (
         f'- You already opened the call with: "{greeting}" You do not know who is '
-        "calling. Wait for their name and their phone number, call set_caller_details "
-        "with both, and only then book."
+        "calling and you do not have their phone number. Ask for their name and "
+        "their phone number, call set_caller_details with both, and only then "
+        "book. They will need that number to see the appointment online."
     )
 
 

@@ -548,19 +548,27 @@ def test_name_only_asks_for_the_number_next():
 # --------------------------------------------------- browser = unknown caller
 
 
-def test_browser_without_caller_id_behaves_like_an_unknown_phone_caller():
-    """No ?phone= → synthetic caller id, asked for a name only, never a number."""
+def test_browser_without_caller_id_is_asked_for_a_number_too():
+    """No ?phone= → synthetic caller id, and the caller is asked for BOTH.
+
+    This test used to assert the opposite — name only, never a number — which
+    is what let browser callers be filed under their synthetic session id. Such
+    an account can never be signed into, so the appointment they just booked
+    was unreachable to them. A synthetic id is not a phone number.
+    """
     from routes.audio import identify_caller
     from agents.prompt import greeting_for, build_system_prompt
 
     session = identify_caller(None)
     assert session.caller_phone and session.caller_phone.startswith("web-")
     assert session.patient_id is None and session.known_at_start is False
+    assert session.has_real_number is False
 
     greeting = greeting_for(session)
-    assert "name" in greeting and "phone" not in greeting.lower()
-    assert "phone number" not in build_system_prompt(session).split("WHO IS CALLING")[1].split("SPEAKING")[0].lower() \
-        or "not on record" in build_system_prompt(session)
+    assert "name" in greeting and "phone number" in greeting.lower()
+
+    identity = build_system_prompt(session).split("WHO IS CALLING")[1].split("SPEAKING")[0]
+    assert "phone number" in identity.lower()
 
 
 def test_browser_caller_books_after_giving_only_a_name():
